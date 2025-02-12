@@ -1,12 +1,3 @@
-# HyperSpace Node Manager
-
-Простой и удобный менеджер для установки и управления нодой HyperSpace AI.
-
-## 🚀 Быстрая установка
-
-bash
-rm -f hype.sh && wget -nc --no-cache https://raw.githubusercontent.com/node-trip/hyperspaceai/main/hype.sh && chmod +x hype.sh && ./hype.sh
-
 
 ## 🔑 Получение и вставка приватного ключа
 
