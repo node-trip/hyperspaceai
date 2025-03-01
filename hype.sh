@@ -67,6 +67,13 @@ install_node() {
     sleep 2
     nano hyperspace.pem
 
+    # Создаем резервную копию ключа
+    if [ -f "$HOME/hyperspace.pem" ]; then
+        echo -e "${GREEN}Создаем резервную копию ключа...${NC}"
+        cp $HOME/hyperspace.pem $HOME/hyperspace.pem.backup
+        chmod 644 $HOME/hyperspace.pem.backup
+    fi
+
     aios-cli hive import-keys ./hyperspace.pem
 
     echo -e "${GREEN}🔑 Вход в систему...${NC}"
@@ -126,6 +133,145 @@ remove_node() {
     echo -e "${GREEN}Нода успешно удалена${NC}"
 }
 
+restart_node() {
+    echo -e "${YELLOW}Перезапуск ноды...${NC}"
+    
+    # Останавливаем процессы и удаляем файлы демона
+    echo -e "${BLUE}Останавливаем процессы и очищаем временные файлы...${NC}"
+    lsof -i :50051 | grep LISTEN | awk '{print $2}' | xargs -r kill -9
+    rm -rf /tmp/aios*
+    rm -rf $HOME/.aios/daemon*
+    screen -X -S hyperspace quit
+    sleep 5
+    
+    # Проверка и восстановление файла ключа
+    if [ ! -f "$HOME/hyperspace.pem" ] && [ -f "$HOME/hyperspace.pem.backup" ]; then
+        echo -e "${YELLOW}Основной файл ключа не найден. Восстанавливаем из резервной копии...${NC}"
+        cp $HOME/hyperspace.pem.backup $HOME/hyperspace.pem
+        chmod 644 $HOME/hyperspace.pem
+    fi
+    
+    # Создаём screen сессию для запуска ноды
+    echo -e "${BLUE}Создаём новую сессию screen...${NC}"
+    screen -S hyperspace -dm
+    screen -S hyperspace -p 0 -X stuff $'export PATH=$PATH:$HOME/.aios\naios-cli start\n'
+    sleep 5
+    
+    # Аутентификация и подключение к Hive
+    echo -e "${BLUE}Аутентификация в Hive...${NC}"
+    # Проверяем, существует ли файл ключа
+    export PATH=$PATH:$HOME/.aios
+    if [ -f "$HOME/hyperspace.pem" ]; then
+        echo -e "${GREEN}Импортируем ключ...${NC}"
+        aios-cli hive import-keys ./hyperspace.pem
+    else
+        echo -e "${RED}Файл ключа не найден.${NC}"
+        echo -e "${YELLOW}Требуется ввести приватный ключ.${NC}"
+        echo -e "${YELLOW}Введите ваш приватный ключ (без пробелов и переносов строк):${NC}"
+        read -r private_key
+        echo "$private_key" > hyperspace.pem
+        chmod 644 hyperspace.pem
+        cp $HOME/hyperspace.pem $HOME/hyperspace.pem.backup
+        chmod 644 $HOME/hyperspace.pem.backup
+        aios-cli hive import-keys ./hyperspace.pem
+    fi
+    
+    echo -e "${BLUE}Вход в систему Hive...${NC}"
+    aios-cli hive login
+    sleep 5
+    
+    echo -e "${BLUE}Подключаемся к Hive...${NC}"
+    aios-cli hive connect
+    sleep 5
+    
+    # Выбираем тир
+    echo -e "${BLUE}Выбираем тир...${NC}"
+    aios-cli hive select-tier 3
+    sleep 3
+    
+    # Проверяем статус
+    echo -e "${GREEN}Проверка статуса ноды после перезапуска:${NC}"
+    aios-cli status
+    
+    echo -e "${GREEN}✅ Нода перезапущена!${NC}"
+}
+
+setup_restart_cron() {
+    echo -e "${YELLOW}Настройка автоматического перезапуска ноды${NC}"
+    
+    # Проверяем наличие cron
+    if ! command -v crontab &> /dev/null; then
+        echo -e "${RED}crontab не установлен. Устанавливаем...${NC}"
+        apt-get update && apt-get install -y cron
+    fi
+    
+    # Проверяем, запущен ли cron
+    if ! systemctl is-active --quiet cron; then
+        echo -e "${YELLOW}Cron не запущен. Запускаем...${NC}"
+        systemctl start cron
+        systemctl enable cron
+    fi
+    
+    echo -e "${GREEN}Выберите интервал перезапуска:${NC}"
+    echo "1) Каждые 12 часов"
+    echo "2) Каждые 24 часа (раз в сутки)"
+    echo "3) Другой интервал (ввести вручную)"
+    echo "4) Отключить автоматический перезапуск"
+    echo "5) Вернуться в главное меню"
+    
+    read -p "Ваш выбор: " cron_choice
+    
+    # Создаем команду перезапуска
+    RESTART_CMD="lsof -i :50051 | grep LISTEN | awk '{print \$2}' | xargs -r kill -9 && rm -rf /tmp/aios* && rm -rf \$HOME/.aios/daemon* && screen -X -S hyperspace quit && sleep 5 && (if [ ! -f \"\$HOME/hyperspace.pem\" ] && [ -f \"\$HOME/hyperspace.pem.backup\" ]; then cp \$HOME/hyperspace.pem.backup \$HOME/hyperspace.pem; fi) && screen -S hyperspace -dm && screen -S hyperspace -p 0 -X stuff 'export PATH=\$PATH:\$HOME/.aios\naios-cli start\n' && sleep 5 && export PATH=\$PATH:\$HOME/.aios && aios-cli hive import-keys ./hyperspace.pem && aios-cli hive login && sleep 5 && aios-cli hive connect && sleep 5 && aios-cli status"
+    SCRIPT_PATH="$HOME/hyperspace_restart.sh"
+    
+    # Создаем скрипт перезапуска
+    echo "#!/bin/bash" > $SCRIPT_PATH
+    echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.aios" >> $SCRIPT_PATH
+    echo "cd $HOME" >> $SCRIPT_PATH
+    echo "$RESTART_CMD" >> $SCRIPT_PATH
+    chmod +x $SCRIPT_PATH
+    
+    case $cron_choice in
+        1)
+            # Каждые 12 часов (в 00:00 и 12:00)
+            CRON_EXPRESSION="0 0,12 * * *"
+            ;;
+        2)
+            # Каждые 24 часа (в 00:00)
+            CRON_EXPRESSION="0 0 * * *"
+            ;;
+        3)
+            # Ввод пользовательского cron-выражения
+            echo -e "${YELLOW}Введите cron-выражение (например, '0 */6 * * *' для перезапуска каждые 6 часов):${NC}"
+            read -r CRON_EXPRESSION
+            ;;
+        4)
+            # Удаляем существующие задания cron для перезапуска
+            crontab -l | grep -v "hyperspace_restart.sh" | crontab -
+            echo -e "${GREEN}Автоматический перезапуск отключен.${NC}"
+            return
+            ;;
+        5)
+            # Возврат в главное меню без изменений
+            echo -e "${YELLOW}Возврат в главное меню без изменений настроек перезапуска...${NC}"
+            return
+            ;;
+        *)
+            echo -e "${RED}Неверный выбор. Используем значение по умолчанию (12 часов).${NC}"
+            CRON_EXPRESSION="0 0,12 * * *"
+            ;;
+    esac
+    
+    # Обновляем crontab
+    (crontab -l 2>/dev/null | grep -v "hyperspace_restart.sh" ; echo "$CRON_EXPRESSION $SCRIPT_PATH > $HOME/hyperspace_restart.log 2>&1") | crontab -
+    
+    echo -e "${GREEN}✅ Автоматический перезапуск настроен!${NC}"
+    echo -e "${YELLOW}Расписание: $CRON_EXPRESSION${NC}"
+    echo -e "${YELLOW}Скрипт перезапуска: $SCRIPT_PATH${NC}"
+    echo -e "${YELLOW}Лог перезапуска: $HOME/hyperspace_restart.log${NC}"
+}
+
 while true; do
     print_header
     echo -e "${GREEN}Выберите действие:${NC}"
@@ -134,6 +280,8 @@ while true; do
     echo "3) Проверить пойнты"
     echo "4) Проверить статус"
     echo "5) Удалить ноду"
+    echo "6) Перезапустить ноду"
+    echo "7) Настроить автоперезапуск"
     echo "0) Выход"
     
     read -p "Ваш выбор: " choice
@@ -144,6 +292,8 @@ while true; do
         3) check_points ;;
         4) check_status ;;
         5) remove_node ;;
+        6) restart_node ;;
+        7) setup_restart_cron ;;
         0) exit 0 ;;
         *) echo -e "${RED}Неверный выбор${NC}" ;;
     esac
