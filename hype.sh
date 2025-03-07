@@ -286,41 +286,84 @@ log_message() {
     echo "$(date): $1" >> $LOG_FILE
 }
 
+restart_node() {
+    log_message "Начинаем процедуру перезапуска ноды..."
+    
+    # Используем тот же метод перезапуска, что и при ручном режиме
+    lsof -i :50051 | grep LISTEN | awk '{print $2}' | xargs -r kill -9
+    rm -rf /tmp/aios*
+    rm -rf $HOME/.aios/daemon*
+    screen -X -S hyperspace quit
+    sleep 5
+    
+    # Проверяем и восстанавливаем ключ если нужно
+    if [ ! -f "$HOME/hyperspace.pem" ] && [ -f "$HOME/hyperspace.pem.backup" ]; then
+        cp $HOME/hyperspace.pem.backup $HOME/hyperspace.pem
+    fi
+    
+    # Создаем новую сессию и запускаем ноду
+    screen -S hyperspace -dm
+    screen -S hyperspace -p 0 -X stuff "export PATH=$PATH:$HOME/.aios\naios-cli start\n"
+    sleep 5
+    
+    # Импортируем ключи и подключаемся
+    export PATH=$PATH:$HOME/.aios
+    aios-cli hive import-keys ./hyperspace.pem
+    aios-cli hive login
+    sleep 5
+    aios-cli hive connect
+    sleep 5
+    aios-cli status
+    
+    log_message "Процедура перезапуска завершена"
+    sleep 30
+}
+
+check_node_health() {
+    # Проверяем, запущен ли процесс aios
+    if ! pgrep -f "aios" > /dev/null; then
+        log_message "Процесс aios не найден, требуется перезапуск"
+        return 1
+    fi
+    
+    # Проверяем порт 50051
+    if ! lsof -i :50051 | grep LISTEN > /dev/null; then
+        log_message "Порт 50051 не прослушивается, требуется перезапуск"
+        return 1
+    fi
+    
+    return 0
+}
+
 while true; do
+    # Проверяем здоровье ноды
+    if ! check_node_health; then
+        restart_node
+        LAST_POINTS="0"
+        sleep 300  # Ждем 5 минут после перезапуска
+        continue
+    fi
+    
     # Получаем текущие поинты
     CURRENT_POINTS=$(aios-cli hive points | grep "Points:" | awk '{print $2}')
     
+    # Проверяем, получили ли мы значение поинтов
+    if [ -z "$CURRENT_POINTS" ]; then
+        log_message "Не удалось получить значение поинтов, пропускаем итерацию"
+        sleep 300
+        continue
+    fi
+    
     # Проверяем, изменились ли поинты
     if [ "$CURRENT_POINTS" = "$LAST_POINTS" ] || { [ "$CURRENT_POINTS" != "NaN" ] && [ "$LAST_POINTS" != "NaN" ] && [ "$CURRENT_POINTS" -eq "$LAST_POINTS" ]; }; then
-        log_message "Поинты не изменились (Текущие: $CURRENT_POINTS, Предыдущие: $LAST_POINTS). Перезапуск ноды..."
-        
-        # Останавливаем процессы
-        screen -S "$SCREEN_NAME" -X stuff $'\003'
-        sleep 5
-        screen -S "$SCREEN_NAME" -X stuff "aios-cli kill\n"
-        sleep 5
-        
-        # Очищаем временные файлы
-        rm -rf /tmp/aios*
-        rm -rf $HOME/.aios/daemon*
-        
-        # Перезапускаем ноду
-        screen -S "$SCREEN_NAME" -X stuff "export PATH=$PATH:$HOME/.aios\n"
-        screen -S "$SCREEN_NAME" -X stuff "aios-cli start\n"
-        sleep 10
-        screen -S "$SCREEN_NAME" -X stuff "aios-cli hive import-keys ./hyperspace.pem\n"
-        sleep 5
-        screen -S "$SCREEN_NAME" -X stuff "aios-cli hive login\n"
-        sleep 5
-        screen -S "$SCREEN_NAME" -X stuff "aios-cli hive connect\n"
-        
-        log_message "Нода перезапущена"
+        log_message "Поинты не изменились (Текущие: $CURRENT_POINTS, Предыдущие: $LAST_POINTS). Запускаем перезапуск..."
+        restart_node
     else
         log_message "Поинты обновились (Текущие: $CURRENT_POINTS, Предыдущие: $LAST_POINTS)"
     fi
     
     LAST_POINTS="$CURRENT_POINTS"
-    sleep 10800  # Проверка каждые 3 часа
+    sleep 3600  # Проверка каждый час
 done
 EOL
 
