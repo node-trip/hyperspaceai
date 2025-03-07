@@ -272,6 +272,92 @@ setup_restart_cron() {
     echo -e "${YELLOW}Лог перезапуска: $HOME/hyperspace_restart.log${NC}"
 }
 
+smart_monitor() {
+    echo -e "${GREEN}Настройка умного мониторинга ноды...${NC}"
+    
+    # Создаем скрипт мониторинга
+    cat > $HOME/points_monitor_hyperspace.sh << 'EOL'
+#!/bin/bash
+LOG_FILE="$HOME/smart_monitor.log"
+SCREEN_NAME="hyperspace"
+LAST_POINTS="0"
+
+log_message() {
+    echo "$(date): $1" >> $LOG_FILE
+}
+
+while true; do
+    # Получаем текущие поинты
+    CURRENT_POINTS=$(aios-cli hive points | grep "Points:" | awk '{print $2}')
+    
+    # Проверяем, изменились ли поинты
+    if [ "$CURRENT_POINTS" = "$LAST_POINTS" ] || { [ "$CURRENT_POINTS" != "NaN" ] && [ "$LAST_POINTS" != "NaN" ] && [ "$CURRENT_POINTS" -eq "$LAST_POINTS" ]; }; then
+        log_message "Поинты не изменились (Текущие: $CURRENT_POINTS, Предыдущие: $LAST_POINTS). Перезапуск ноды..."
+        
+        # Останавливаем процессы
+        screen -S "$SCREEN_NAME" -X stuff $'\003'
+        sleep 5
+        screen -S "$SCREEN_NAME" -X stuff "aios-cli kill\n"
+        sleep 5
+        
+        # Очищаем временные файлы
+        rm -rf /tmp/aios*
+        rm -rf $HOME/.aios/daemon*
+        
+        # Перезапускаем ноду
+        screen -S "$SCREEN_NAME" -X stuff "export PATH=$PATH:$HOME/.aios\n"
+        screen -S "$SCREEN_NAME" -X stuff "aios-cli start\n"
+        sleep 10
+        screen -S "$SCREEN_NAME" -X stuff "aios-cli hive import-keys ./hyperspace.pem\n"
+        sleep 5
+        screen -S "$SCREEN_NAME" -X stuff "aios-cli hive login\n"
+        sleep 5
+        screen -S "$SCREEN_NAME" -X stuff "aios-cli hive connect\n"
+        
+        log_message "Нода перезапущена"
+    else
+        log_message "Поинты обновились (Текущие: $CURRENT_POINTS, Предыдущие: $LAST_POINTS)"
+    fi
+    
+    LAST_POINTS="$CURRENT_POINTS"
+    sleep 10800  # Проверка каждые 3 часа
+done
+EOL
+
+    chmod +x $HOME/points_monitor_hyperspace.sh
+    
+    # Останавливаем существующий процесс мониторинга, если есть
+    PIDS=$(ps aux | grep "[p]oints_monitor_hyperspace.sh" | awk '{print $2}')
+    for PID in $PIDS; do
+        kill -9 $PID
+        echo -e "${YELLOW}Остановлен старый процесс мониторинга с PID $PID${NC}"
+    done
+    
+    # Запускаем новый процесс мониторинга
+    nohup $HOME/points_monitor_hyperspace.sh > $HOME/points_monitor_hyperspace.log 2>&1 &
+    
+    echo -e "${GREEN}✅ Умный мониторинг успешно настроен!${NC}"
+    echo -e "${YELLOW}Лог мониторинга: $HOME/smart_monitor.log${NC}"
+    echo -e "${YELLOW}Лог процесса: $HOME/points_monitor_hyperspace.log${NC}"
+}
+
+stop_monitor() {
+    echo -e "${YELLOW}Останавливаем умный мониторинг...${NC}"
+    
+    PIDS=$(ps aux | grep "[p]oints_monitor_hyperspace.sh" | awk '{print $2}')
+    if [ -z "$PIDS" ]; then
+        echo -e "${RED}Процесс мониторинга не найден${NC}"
+        return
+    fi
+    
+    for PID in $PIDS; do
+        kill -9 $PID
+        echo -e "${GREEN}Остановлен процесс мониторинга с PID $PID${NC}"
+    done
+    
+    echo -e "${GREEN}✅ Умный мониторинг остановлен${NC}"
+}
+
 while true; do
     print_header
     echo -e "${GREEN}Выберите действие:${NC}"
@@ -281,7 +367,8 @@ while true; do
     echo "4) Проверить статус"
     echo "5) Удалить ноду"
     echo "6) Перезапустить ноду"
-    echo "7) Настроить автоперезапуск"
+    echo "7) Включить умный мониторинг"
+    echo "8) Выключить умный мониторинг"
     echo "0) Выход"
     
     read -p "Ваш выбор: " choice
@@ -293,7 +380,8 @@ while true; do
         4) check_status ;;
         5) remove_node ;;
         6) restart_node ;;
-        7) setup_restart_cron ;;
+        7) smart_monitor ;;
+        8) stop_monitor ;;
         0) exit 0 ;;
         *) echo -e "${RED}Неверный выбор${NC}" ;;
     esac
