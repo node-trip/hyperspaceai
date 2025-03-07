@@ -358,6 +358,21 @@ stop_monitor() {
     echo -e "${GREEN}✅ Умный мониторинг остановлен${NC}"
 }
 
+disable_cron_restart() {
+    echo -e "${YELLOW}Отключение автоматического перезапуска по расписанию...${NC}"
+    
+    # Удаляем существующие задания cron для перезапуска
+    crontab -l | grep -v "hyperspace_restart.sh" | crontab -
+    
+    # Удаляем скрипт перезапуска если он существует
+    if [ -f "$HOME/hyperspace_restart.sh" ]; then
+        rm -f "$HOME/hyperspace_restart.sh"
+        echo -e "${GREEN}Скрипт перезапуска удален${NC}"
+    fi
+    
+    echo -e "${GREEN}✅ Автоматический перезапуск по расписанию отключен${NC}"
+}
+
 while true; do
     print_header
     echo -e "${GREEN}Выберите действие:${NC}"
@@ -369,6 +384,7 @@ while true; do
     echo "6) Перезапустить ноду"
     echo "7) Включить умный мониторинг"
     echo "8) Выключить умный мониторинг"
+    echo "9) Отключить автоперезапуск по расписанию"
     echo "0) Выход"
     
     read -p "Ваш выбор: " choice
@@ -382,6 +398,7 @@ while true; do
         6) restart_node ;;
         7) smart_monitor ;;
         8) stop_monitor ;;
+        9) disable_cron_restart ;;
         0) exit 0 ;;
         *) echo -e "${RED}Неверный выбор${NC}" ;;
     esac
