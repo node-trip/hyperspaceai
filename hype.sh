@@ -416,6 +416,57 @@ disable_cron_restart() {
     echo -e "${GREEN}✅ Автоматический перезапуск по расписанию отключен${NC}"
 }
 
+check_monitor_status() {
+    echo -e "${GREEN}Проверка состояния умного мониторинга...${NC}"
+    
+    # Проверяем процесс мониторинга
+    MONITOR_PID=$(ps aux | grep "[p]oints_monitor_hyperspace.sh" | awk '{print $2}')
+    if [ -z "$MONITOR_PID" ]; then
+        echo -e "${RED}❌ Процесс мониторинга не запущен${NC}"
+    else
+        echo -e "${GREEN}✅ Процесс мониторинга активен (PID: $MONITOR_PID)${NC}"
+    fi
+    
+    # Проверяем существование и размер лог-файла
+    if [ -f "$HOME/smart_monitor.log" ]; then
+        LAST_LOGS=$(tail -n 10 $HOME/smart_monitor.log)
+        LAST_CHECK=$(echo "$LAST_LOGS" | grep "$(date +%Y-%m-%d)" | tail -n 1)
+        
+        echo -e "\n${YELLOW}Последние записи в логе:${NC}"
+        echo "$LAST_LOGS"
+        
+        if [ ! -z "$LAST_CHECK" ]; then
+            echo -e "\n${GREEN}✅ Мониторинг активно ведет логи${NC}"
+        else
+            echo -e "\n${RED}❌ Нет свежих записей в логе за сегодня${NC}"
+        fi
+    else
+        echo -e "${RED}❌ Лог-файл мониторинга не найден${NC}"
+    fi
+    
+    # Проверяем статус ноды
+    echo -e "\n${YELLOW}Текущий статус ноды:${NC}"
+    if pgrep -f "aios" > /dev/null; then
+        echo -e "${GREEN}✅ Процесс aios запущен${NC}"
+    else
+        echo -e "${RED}❌ Процесс aios не запущен${NC}"
+    fi
+    
+    if lsof -i :50051 | grep LISTEN > /dev/null; then
+        echo -e "${GREEN}✅ Порт 50051 прослушивается${NC}"
+    else
+        echo -e "${RED}❌ Порт 50051 не прослушивается${NC}"
+    fi
+    
+    # Проверяем поинты
+    CURRENT_POINTS=$(aios-cli hive points | grep "Points:" | awk '{print $2}')
+    if [ ! -z "$CURRENT_POINTS" ]; then
+        echo -e "${GREEN}✅ Текущие поинты: $CURRENT_POINTS${NC}"
+    else
+        echo -e "${RED}❌ Не удалось получить значение поинтов${NC}"
+    fi
+}
+
 while true; do
     print_header
     echo -e "${GREEN}Выберите действие:${NC}"
@@ -428,6 +479,7 @@ while true; do
     echo "7) Включить умный мониторинг"
     echo "8) Выключить умный мониторинг"
     echo "9) Отключить автоперезапуск по расписанию"
+    echo "10) Проверить состояние мониторинга"
     echo "0) Выход"
     
     read -p "Ваш выбор: " choice
@@ -442,6 +494,7 @@ while true; do
         7) smart_monitor ;;
         8) stop_monitor ;;
         9) disable_cron_restart ;;
+        10) check_monitor_status ;;
         0) exit 0 ;;
         *) echo -e "${RED}Неверный выбор${NC}" ;;
     esac
