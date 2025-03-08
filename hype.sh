@@ -300,6 +300,8 @@ LAST_POINTS="0"
 NAN_COUNT=0
 MAX_NAN_RETRIES=3
 CHECK_INTERVAL=3600  # Проверка каждый час по умолчанию
+FAIL_COUNT=0
+MAX_FAIL_RETRIES=2  # Максимальное количество ошибок подряд
 
 # Добавляем правильный PATH
 export PATH="$PATH:$HOME/.aios"
@@ -362,6 +364,13 @@ check_node_health() {
         return 1
     fi
     
+    # Проверяем подключение к Hive
+    HIVE_STATUS=$($HOME/.aios/aios-cli hive connect 2>&1)
+    if echo "$HIVE_STATUS" | grep -q "error"; then
+        log_message "Проблема с подключением к Hive: $HIVE_STATUS"
+        return 1
+    fi
+    
     return 0
 }
 
@@ -371,12 +380,36 @@ while true; do
         restart_node
         LAST_POINTS="0"
         NAN_COUNT=0
+        FAIL_COUNT=0
         sleep 300  # Ждем 5 минут после перезапуска
         continue
     fi
     
     # Получаем текущие поинты
-    POINTS_OUTPUT=$($HOME/.aios/aios-cli hive points 2>/dev/null)
+    POINTS_OUTPUT=$($HOME/.aios/aios-cli hive points 2>&1)
+    
+    # Проверяем наличие ошибок в выводе команды
+    if echo "$POINTS_OUTPUT" | grep -q "Failed to fetch points" || echo "$POINTS_OUTPUT" | grep -q "error"; then
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        log_message "Ошибка при получении поинтов: $POINTS_OUTPUT (Попытка $FAIL_COUNT/$MAX_FAIL_RETRIES)"
+        
+        if [ $FAIL_COUNT -ge $MAX_FAIL_RETRIES ]; then
+            log_message "Достигнуто максимальное количество ошибок подряд, перезапускаем ноду"
+            restart_node
+            FAIL_COUNT=0
+            NAN_COUNT=0
+            LAST_POINTS="0"
+        else
+            # Уменьшаем интервал проверки при ошибке
+            sleep 300  # Проверяем через 5 минут
+            continue
+        fi
+    else
+        # Сбрасываем счетчик ошибок если получили нормальный ответ
+        FAIL_COUNT=0
+    fi
+    
+    # Извлекаем значение поинтов
     CURRENT_POINTS=$(echo "$POINTS_OUTPUT" | grep "Points:" | awk '{print $2}')
     
     # Проверяем, получили ли мы значение поинтов
@@ -398,6 +431,7 @@ while true; do
             log_message "Достигнуто максимальное количество NaN подряд, перезапускаем ноду"
             restart_node
             NAN_COUNT=0
+            FAIL_COUNT=0
             LAST_POINTS="0"
         else
             # Уменьшаем интервал проверки при NaN
@@ -462,21 +496,6 @@ stop_monitor() {
     done
     
     echo -e "${GREEN}✅ Умный мониторинг остановлен${NC}"
-}
-
-disable_cron_restart() {
-    echo -e "${YELLOW}Отключение автоматического перезапуска по расписанию...${NC}"
-    
-    # Удаляем существующие задания cron для перезапуска
-    crontab -l | grep -v "hyperspace_restart.sh" | crontab -
-    
-    # Удаляем скрипт перезапуска если он существует
-    if [ -f "$HOME/hyperspace_restart.sh" ]; then
-        rm -f "$HOME/hyperspace_restart.sh"
-        echo -e "${GREEN}Скрипт перезапуска удален${NC}"
-    fi
-    
-    echo -e "${GREEN}✅ Автоматический перезапуск по расписанию отключен${NC}"
 }
 
 check_monitor_status() {
@@ -564,7 +583,9 @@ else
     echo -e "${YELLOW}Проверка статуса подключения:${NC}"
     $HOME/.aios/aios-cli status
     echo -e "${YELLOW}Проверка подключения к Hive:${NC}"
-    $HOME/.aios/aios-cli hive status
+    $HOME/.aios/aios-cli hive connect
+    echo -e "${YELLOW}Проверка логина в Hive:${NC}"
+    $HOME/.aios/aios-cli hive login
 fi
 EOL
     chmod +x $HOME/check_hyperspace.sh
@@ -581,8 +602,7 @@ while true; do
     echo "6) Перезапустить ноду"
     echo "7) Включить умный мониторинг"
     echo "8) Выключить умный мониторинг"
-    echo "9) Отключить автоперезапуск по расписанию"
-    echo "10) Проверить состояние мониторинга"
+    echo "9) Проверить состояние мониторинга"
     echo "0) Выход"
     
     read -p "Ваш выбор: " choice
@@ -596,8 +616,7 @@ while true; do
         6) restart_node ;;
         7) smart_monitor ;;
         8) stop_monitor ;;
-        9) disable_cron_restart ;;
-        10) check_monitor_status ;;
+        9) check_monitor_status ;;
         0) exit 0 ;;
         *) echo -e "${RED}Неверный выбор${NC}" ;;
     esac
