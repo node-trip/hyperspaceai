@@ -297,12 +297,15 @@ smart_monitor() {
 LOG_FILE="$HOME/smart_monitor.log"
 SCREEN_NAME="hyperspace"
 LAST_POINTS="0"
+NAN_COUNT=0
+MAX_NAN_RETRIES=3
+CHECK_INTERVAL=3600  # Проверка каждый час по умолчанию
 
 # Добавляем правильный PATH
 export PATH="$PATH:$HOME/.aios"
 
 log_message() {
-    echo "$(date): $1" >> $LOG_FILE
+    echo "$(date +"%Y-%m-%d %H:%M:%S"): $1" >> $LOG_FILE
 }
 
 restart_node() {
@@ -323,19 +326,21 @@ restart_node() {
     # Создаем новую сессию и запускаем ноду
     screen -S hyperspace -dm
     screen -S hyperspace -p 0 -X stuff "export PATH=$PATH:$HOME/.aios\naios-cli start\n"
-    sleep 5
+    sleep 10
     
     # Импортируем ключи и подключаемся
     export PATH=$PATH:$HOME/.aios
     aios-cli hive import-keys ./hyperspace.pem
     aios-cli hive login
-    sleep 5
+    sleep 10
     aios-cli hive connect
+    sleep 5
+    aios-cli hive select-tier 3
     sleep 5
     aios-cli status
     
     log_message "Процедура перезапуска завершена"
-    sleep 30
+    sleep 60  # Увеличиваем время ожидания после перезапуска
 }
 
 check_node_health() {
@@ -365,12 +370,14 @@ while true; do
     if ! check_node_health; then
         restart_node
         LAST_POINTS="0"
+        NAN_COUNT=0
         sleep 300  # Ждем 5 минут после перезапуска
         continue
     fi
     
     # Получаем текущие поинты
-    CURRENT_POINTS=$($HOME/.aios/aios-cli hive points 2>/dev/null | grep "Points:" | awk '{print $2}')
+    POINTS_OUTPUT=$($HOME/.aios/aios-cli hive points 2>/dev/null)
+    CURRENT_POINTS=$(echo "$POINTS_OUTPUT" | grep "Points:" | awk '{print $2}')
     
     # Проверяем, получили ли мы значение поинтов
     if [ -z "$CURRENT_POINTS" ]; then
@@ -379,16 +386,47 @@ while true; do
         continue
     fi
     
-    # Проверяем, изменились ли поинты
-    if [ "$CURRENT_POINTS" = "$LAST_POINTS" ] || { [ "$CURRENT_POINTS" != "NaN" ] && [ "$LAST_POINTS" != "NaN" ] && [ "$CURRENT_POINTS" -eq "$LAST_POINTS" ]; }; then
-        log_message "Поинты не изменились (Текущие: $CURRENT_POINTS, Предыдущие: $LAST_POINTS). Запускаем перезапуск..."
-        restart_node
+    # Логируем текущее состояние
+    log_message "Проверка поинтов: Текущие: $CURRENT_POINTS, Предыдущие: $LAST_POINTS"
+    
+    # Обработка случая с NaN
+    if [ "$CURRENT_POINTS" = "NaN" ]; then
+        NAN_COUNT=$((NAN_COUNT + 1))
+        log_message "Получено значение NaN ($NAN_COUNT/$MAX_NAN_RETRIES)"
+        
+        if [ $NAN_COUNT -ge $MAX_NAN_RETRIES ]; then
+            log_message "Достигнуто максимальное количество NaN подряд, перезапускаем ноду"
+            restart_node
+            NAN_COUNT=0
+            LAST_POINTS="0"
+        else
+            # Уменьшаем интервал проверки при NaN
+            sleep 600  # Проверяем через 10 минут
+            continue
+        fi
     else
-        log_message "Поинты обновились (Текущие: $CURRENT_POINTS, Предыдущие: $LAST_POINTS)"
+        # Сбрасываем счетчик NaN если получили нормальное значение
+        NAN_COUNT=0
     fi
     
-    LAST_POINTS="$CURRENT_POINTS"
-    sleep 3600  # Проверка каждый час
+    # Проверяем, изменились ли поинты (только если не NaN)
+    if [ "$CURRENT_POINTS" != "NaN" ] && [ "$LAST_POINTS" != "NaN" ] && [ "$LAST_POINTS" != "0" ]; then
+        if [ "$CURRENT_POINTS" = "$LAST_POINTS" ]; then
+            log_message "Поинты не изменились (Текущие: $CURRENT_POINTS, Предыдущие: $LAST_POINTS). Запускаем перезапуск..."
+            restart_node
+        else
+            log_message "Поинты обновились (Текущие: $CURRENT_POINTS, Предыдущие: $LAST_POINTS)"
+        fi
+    else
+        log_message "Пропускаем сравнение поинтов (первый запуск или NaN)"
+    fi
+    
+    # Обновляем последнее значение поинтов
+    if [ "$CURRENT_POINTS" != "NaN" ]; then
+        LAST_POINTS="$CURRENT_POINTS"
+    fi
+    
+    sleep $CHECK_INTERVAL
 done
 EOL
 
@@ -455,7 +493,8 @@ check_monitor_status() {
     # Проверяем существование и размер лог-файла
     if [ -f "$HOME/smart_monitor.log" ]; then
         LAST_LOGS=$(tail -n 10 $HOME/smart_monitor.log)
-        LAST_CHECK=$(echo "$LAST_LOGS" | grep "$(date +%Y-%m-%d)" | tail -n 1)
+        CURRENT_DATE=$(date +%Y-%m-%d)
+        LAST_CHECK=$(echo "$LAST_LOGS" | grep "$CURRENT_DATE" | tail -n 1)
         
         echo -e "\n${YELLOW}Последние записи в логе:${NC}"
         echo "$LAST_LOGS"
@@ -464,6 +503,7 @@ check_monitor_status() {
             echo -e "\n${GREEN}✅ Мониторинг активно ведет логи${NC}"
         else
             echo -e "\n${RED}❌ Нет свежих записей в логе за сегодня${NC}"
+            echo -e "${YELLOW}Проверка системной даты: $(date)${NC}"
         fi
     else
         echo -e "${RED}❌ Лог-файл мониторинга не найден${NC}"
@@ -499,9 +539,15 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+echo -e "${YELLOW}Текущая дата и время: $(date)${NC}"
+echo -e "${YELLOW}Проверка PATH: $PATH${NC}"
+
 # Проверяем поинты
-POINTS_OUTPUT=$($HOME/.aios/aios-cli hive points 2>/dev/null)
-if [ ! -z "$POINTS_OUTPUT" ]; then
+echo -e "${YELLOW}Выполняем команду: $HOME/.aios/aios-cli hive points${NC}"
+POINTS_OUTPUT=$($HOME/.aios/aios-cli hive points 2>&1)
+echo -e "${YELLOW}Полный вывод команды:${NC}\n$POINTS_OUTPUT"
+
+if echo "$POINTS_OUTPUT" | grep -q "Points:"; then
     CURRENT_POINTS=$(echo "$POINTS_OUTPUT" | grep "Points:" | awk '{print $2}')
     MULTIPLIER=$(echo "$POINTS_OUTPUT" | grep "Multiplier:" | awk '{print $2}')
     TIER=$(echo "$POINTS_OUTPUT" | grep "Tier:" | awk '{print $2}')
@@ -515,6 +561,10 @@ if [ ! -z "$POINTS_OUTPUT" ]; then
     echo -e "${GREEN}✅ Аллокация: $ALLOCATION${NC}"
 else
     echo -e "${RED}❌ Не удалось получить значение поинтов${NC}"
+    echo -e "${YELLOW}Проверка статуса подключения:${NC}"
+    $HOME/.aios/aios-cli status
+    echo -e "${YELLOW}Проверка подключения к Hive:${NC}"
+    $HOME/.aios/aios-cli hive status
 fi
 EOL
     chmod +x $HOME/check_hyperspace.sh
