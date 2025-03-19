@@ -127,8 +127,10 @@ install_node() {
 
     echo -e "${GREEN}Запуск демона...${NC}"
     screen -S hyperspace -dm
-    screen -S hyperspace -p 0 -X stuff $'$HOME/.aios/aios-cli start\n'
-    sleep 5
+    screen -S hyperspace -p 0 -X stuff "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios\n"
+    screen -S hyperspace -p 0 -X stuff "echo 'Запуск AIOS...'\n"
+    screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli start\n"
+    sleep 20
 
     echo -e "${GREEN}Создание файла приватного ключа...${NC}"
     echo -e "${YELLOW}Откроется редактор nano. Вставьте ваш приватный ключ и сохраните файл (CTRL+X, Y, Enter)${NC}"
@@ -251,29 +253,6 @@ restart_node() {
         chmod 644 $HOME/hyperspace.pem
     fi
     
-    # Создаем временный скрипт запуска для выполнения в screen
-    cat > $HOME/hyperspace_startup.sh << 'EOLS'
-#!/bin/bash
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios
-echo "Запуск AIOS..."
-$HOME/.aios/aios-cli start
-sleep 20
-echo "Импорт ключей..."
-$HOME/.aios/aios-cli hive import-keys ./hyperspace.pem
-sleep 5
-echo "Аутентификация в Hive..."
-$HOME/.aios/aios-cli hive login
-sleep 10
-echo "Подключение к Hive..."
-$HOME/.aios/aios-cli hive connect
-sleep 10
-echo "Выбор тира 3..."
-$HOME/.aios/aios-cli hive select-tier 3
-sleep 5
-echo "Настройка завершена. Нода работает."
-EOLS
-    chmod +x $HOME/hyperspace_startup.sh
-    
     # Цикл попыток запуска и подключения
     while [ $hive_retry -lt $MAX_HIVE_RETRIES ] && [ "$success" = false ]; do
         hive_retry=$((hive_retry + 1))
@@ -306,9 +285,9 @@ EOLS
         screen -X -S hyperspace quit >/dev/null 2>&1
         sleep 2
         
-        # Создаём и запускаем screen с нашим скриптом запуска
-        echo -e "${BLUE}Создаём новую сессию screen...${NC}"
-        screen -dmS hyperspace $HOME/hyperspace_startup.sh
+        # Создаём и запускаем только демон в screen
+        echo -e "${BLUE}Создаём новую сессию screen и запускаем демон...${NC}"
+        screen -dmS hyperspace
         sleep 2
         
         # Проверяем, что сессия успешно создана
@@ -318,9 +297,39 @@ EOLS
             continue
         fi
         
-        # Даём время для запуска и инициализации
-        echo -e "${BLUE}Ожидаем запуск демона и инициализацию (60 секунд)...${NC}"
-        sleep 60
+        # Отправляем только команду запуска демона в screen
+        screen -S hyperspace -p 0 -X stuff "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios\n"
+        screen -S hyperspace -p 0 -X stuff "echo 'Запуск AIOS...'\n"
+        screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli start\n"
+        
+        # Ждем запуска демона
+        echo -e "${BLUE}Ждем запуск демона (20 секунд)...${NC}"
+        sleep 20
+        
+        # Проверяем, запустился ли демон
+        if ! pgrep -f "aios" > /dev/null; then
+            echo -e "${RED}Демон не запустился. Повторная попытка...${NC}"
+            screen -X -S hyperspace quit >/dev/null 2>&1
+            sleep 5
+            continue
+        fi
+        
+        # Выполняем команды подключения к Hive НАПРЯМУЮ
+        echo -e "${BLUE}Выполняем команды подключения к Hive...${NC}"
+        $HOME/.aios/aios-cli hive import-keys ./hyperspace.pem
+        sleep 5
+        
+        echo -e "${BLUE}Выполняем вход...${NC}"
+        $HOME/.aios/aios-cli hive login
+        sleep 10
+        
+        echo -e "${BLUE}Подключаемся к Hive...${NC}"
+        $HOME/.aios/aios-cli hive connect
+        sleep 10
+        
+        echo -e "${BLUE}Выбираем тир 3...${NC}"
+        $HOME/.aios/aios-cli hive select-tier 3
+        sleep 5
         
         # Проверяем статус
         echo -e "${GREEN}Проверка статуса ноды после перезапуска:${NC}"
@@ -355,9 +364,6 @@ EOLS
         echo -e "${RED}⚠️ Не удалось запустить ноду после $MAX_HIVE_RETRIES попыток.${NC}"
         echo -e "${YELLOW}Рекомендуется проверить состояние системы и повторить попытку позже.${NC}"
     fi
-    
-    # Удаляем временный скрипт запуска
-    rm -f $HOME/hyperspace_startup.sh
 }
 
 setup_restart_cron() {
@@ -392,7 +398,6 @@ setup_restart_cron() {
     # Создаем скрипт перезапуска
     echo "#!/bin/bash" > $SCRIPT_PATH
     echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.aios" >> $SCRIPT_PATH
-    echo "cd $HOME" >> $SCRIPT_PATH
     echo "$RESTART_CMD" >> $SCRIPT_PATH
     chmod +x $SCRIPT_PATH
     
