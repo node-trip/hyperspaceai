@@ -230,9 +230,15 @@ restart_node() {
     pkill -f aios-cli
     pkill -f aios
     lsof -i :50051 | grep LISTEN | awk '{print $2}' | xargs -r kill -9
+    
+    # Принудительно останавливаем ВСЕ сессии с именем hyperspace
+    echo -e "${BLUE}Закрываем все существующие сессии screen...${NC}"
+    screen -wipe >/dev/null 2>&1
+    screen -ls | grep hyperspace | cut -d. -f1 | xargs -r kill -9
+    screen -X -S hyperspace quit >/dev/null 2>&1
+    
     rm -rf /tmp/aios*
     rm -rf $HOME/.aios/daemon*
-    screen -X -S hyperspace quit
     sleep 5
     
     # Проверка и восстановление файла ключа
@@ -247,9 +253,27 @@ restart_node() {
         hive_retry=$((hive_retry + 1))
         echo -e "${BLUE}Попытка запуска и подключения ($hive_retry из $MAX_HIVE_RETRIES)...${NC}"
         
+        # Проверяем, что нет активных сессий hyperspace перед созданием новой
+        echo -e "${BLUE}Проверка наличия существующих сессий screen...${NC}"
+        if screen -ls | grep -q hyperspace; then
+            echo -e "${YELLOW}Обнаружены существующие сессии. Закрываем их...${NC}"
+            screen -ls | grep hyperspace | cut -d. -f1 | xargs -r kill -9
+            sleep 2
+        fi
+        
         # Создаём screen сессию для запуска ноды
         echo -e "${BLUE}Создаём новую сессию screen...${NC}"
-        screen -S hyperspace -dm
+        screen -dmS hyperspace
+        sleep 2
+        
+        # Проверяем, что сессия успешно создана
+        if ! screen -ls | grep -q hyperspace; then
+            echo -e "${RED}Не удалось создать сессию screen. Повторная попытка...${NC}"
+            sleep 3
+            continue
+        fi
+        
+        # Отправляем команды в screen
         screen -S hyperspace -p 0 -X stuff $'export PATH=$PATH:$HOME/.aios\naios-cli start\n'
         sleep 15
         
@@ -327,6 +351,10 @@ restart_node() {
         fi
         
         if [ "$success" = false ]; then
+            # Если попытка неудачна, закрываем текущую сессию screen перед следующей попыткой
+            echo -e "${YELLOW}Закрываем неудачную сессию screen...${NC}"
+            screen -X -S hyperspace quit >/dev/null 2>&1
+            
             echo -e "${YELLOW}Попытка $hive_retry не удалась. Ожидаем 20 секунд...${NC}"
             sleep 20
         fi
@@ -335,6 +363,7 @@ restart_node() {
     if [ "$success" = true ]; then
         echo -e "${GREEN}✅ Нода успешно перезапущена!${NC}"
     else
+        # Окончательная очистка в случае неудачи
         echo -e "${RED}⚠️ Нода перезапущена, но есть проблемы с подключением к Hive.${NC}"
         echo -e "${YELLOW}Рекомендуется проверить состояние ноды через некоторое время.${NC}"
     fi
@@ -443,6 +472,15 @@ log_message() {
     echo "$(date +"%Y-%m-%d %H:%M:%S"): $1" >> $LOG_FILE
 }
 
+# Функция для закрытия всех сессий screen с именем hyperspace
+kill_all_screens() {
+    log_message "Закрываем все существующие сессии screen hyperspace..."
+    screen -wipe >/dev/null 2>&1
+    screen -ls | grep hyperspace | cut -d. -f1 | xargs -r kill -9 >/dev/null 2>&1
+    screen -X -S hyperspace quit >/dev/null 2>&1
+    sleep 2
+}
+
 wait_for_daemon() {
     local tries=0
     local max_tries=30
@@ -522,41 +560,56 @@ restart_node() {
     local hive_retry=0
     local success=false
     
+    # Полная остановка
+    log_message "Остановка всех процессов..."
+    pkill -f aios-cli
+    pkill -f aios
+    lsof -i :50051 | grep LISTEN | awk '{print $2}' | xargs -r kill -9
+    kill_all_screens
+    sleep 5
+    
+    # Очистка временных файлов и демона
+    log_message "Очистка временных файлов..."
+    rm -rf /tmp/aios*
+    rm -rf $HOME/.aios/daemon*
+    sleep 3
+    
+    # Проверяем и восстанавливаем ключ если нужно
+    if [ ! -f "$HOME/hyperspace.pem" ] && [ -f "$HOME/hyperspace.pem.backup" ]; then
+        log_message "Восстановление ключа из резервной копии..."
+        cp $HOME/hyperspace.pem.backup $HOME/hyperspace.pem
+        chmod 644 $HOME/hyperspace.pem
+    fi
+    
+    # Проверяем наличие ключа
+    if [ ! -f "$HOME/hyperspace.pem" ]; then
+        log_message "ОШИБКА: Файл ключа не найден! Перезапуск невозможен."
+        return 1
+    fi
+    
     # Цикл попыток запуска и подключения
     while [ $hive_retry -lt $MAX_HIVE_RETRIES ] && [ "$success" = false ]; do
         hive_retry=$((hive_retry + 1))
         log_message "Попытка запуска и подключения ($hive_retry из $MAX_HIVE_RETRIES)..."
         
-        # Полная остановка
-        log_message "Остановка всех процессов..."
-        pkill -f aios-cli
-        pkill -f aios
-        lsof -i :50051 | grep LISTEN | awk '{print $2}' | xargs -r kill -9
-        screen -X -S hyperspace quit
-        sleep 5
-        
-        # Очистка временных файлов и демона
-        log_message "Очистка временных файлов..."
-        rm -rf /tmp/aios*
-        rm -rf $HOME/.aios/daemon*
-        sleep 3
-        
-        # Проверяем и восстанавливаем ключ если нужно
-        if [ ! -f "$HOME/hyperspace.pem" ] && [ -f "$HOME/hyperspace.pem.backup" ]; then
-            log_message "Восстановление ключа из резервной копии..."
-            cp $HOME/hyperspace.pem.backup $HOME/hyperspace.pem
-            chmod 644 $HOME/hyperspace.pem
-        fi
-        
-        # Проверяем наличие ключа
-        if [ ! -f "$HOME/hyperspace.pem" ]; then
-            log_message "ОШИБКА: Файл ключа не найден! Перезапуск невозможен."
-            return 1
+        # Проверяем, нет ли уже запущенных screen-сессий
+        if screen -ls | grep -q hyperspace; then
+            log_message "Удаление существующих screen-сессий hyperspace..."
+            kill_all_screens
         fi
         
         # Создаем новую сессию и запускаем ноду
         log_message "Запуск новой сессии screen..."
-        screen -S hyperspace -dm
+        screen -dmS hyperspace
+        sleep 2
+        
+        # Проверяем, создана ли сессия
+        if ! screen -ls | grep -q hyperspace; then
+            log_message "Не удалось создать screen-сессию. Повторная попытка..."
+            sleep 3
+            continue
+        fi
+        
         screen -S hyperspace -p 0 -X stuff "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios\necho 'Запуск AIOS...'\n$HOME/.aios/aios-cli start\n"
         sleep 20
         
@@ -564,6 +617,7 @@ restart_node() {
         log_message "Ожидаем запуск демона..."
         if ! wait_for_daemon; then
             log_message "ОШИБКА: Демон не запустился, пробуем еще раз..."
+            kill_all_screens
             continue
         fi
         
@@ -573,6 +627,7 @@ restart_node() {
         
         if ! echo "$DAEMON_STATUS" | grep -q "Daemon running"; then
             log_message "Демон не запущен, повторная попытка..."
+            kill_all_screens
             continue
         fi
         
@@ -593,7 +648,7 @@ restart_node() {
             log_message "Не удалось подключиться к Hive, возможно сервис временно недоступен. Ожидаем 30 секунд..."
             sleep 30
             continue
-        }
+        fi
         
         sleep 5
         
@@ -612,6 +667,7 @@ restart_node() {
             
             if [ $hive_retry -lt $MAX_HIVE_RETRIES ]; then
                 log_message "Ожидаем 30 секунд перед следующей попыткой..."
+                kill_all_screens
                 sleep 30
             fi
         fi
@@ -622,6 +678,7 @@ restart_node() {
         HIVE_DOWN_COUNT=0  # Сбрасываем счетчик проблем с Hive
     else
         log_message "⚠️ Нода перезапущена, но есть проблемы с подключением к Hive"
+        log_message "Проверьте состояние ноды позже"
     fi
     
     log_message "Процедура перезапуска завершена"
