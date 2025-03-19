@@ -273,9 +273,9 @@ restart_node() {
             continue
         fi
         
-        # Отправляем команды в screen
-        screen -S hyperspace -p 0 -X stuff $'export PATH=$PATH:$HOME/.aios\naios-cli start\n'
-        sleep 15
+        # Отправляем команды в screen - запускаем демон и подключаемся к Hive всё в одной сессии
+        screen -S hyperspace -p 0 -X stuff "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios\necho 'Запуск AIOS...'\n$HOME/.aios/aios-cli start\n"
+        sleep 20
         
         # Проверяем, запустился ли демон
         if ! pgrep -f "aios" > /dev/null; then
@@ -285,53 +285,24 @@ restart_node() {
             continue
         fi
         
-        # Аутентификация и подключение к Hive
-        echo -e "${BLUE}Аутентификация в Hive...${NC}"
-        # Проверяем, существует ли файл ключа
-        export PATH=$PATH:$HOME/.aios
+        # Аутентификация и подключение к Hive также в screen
+        echo -e "${BLUE}Аутентификация и подключение в Hive в screen сессии...${NC}"
         if [ -f "$HOME/hyperspace.pem" ]; then
-            echo -e "${GREEN}Импортируем ключ...${NC}"
-            aios-cli hive import-keys ./hyperspace.pem
+            # Добавляем команды для выполнения внутри screen
+            screen -S hyperspace -p 0 -X stuff "sleep 5\n$HOME/.aios/aios-cli hive import-keys ./hyperspace.pem\n"
+            sleep 3
+            screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli hive login\n"
+            sleep 10
+            screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli hive connect\n"
+            sleep 10
+            screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli hive select-tier 3\n"
+            sleep 5
         else
             echo -e "${RED}Файл ключа не найден.${NC}"
-            echo -e "${YELLOW}Требуется ввести приватный ключ.${NC}"
-            echo -e "${YELLOW}Введите ваш приватный ключ (без пробелов и переносов строк):${NC}"
-            read -r private_key
-            echo "$private_key" > hyperspace.pem
-            chmod 644 hyperspace.pem
-            cp $HOME/hyperspace.pem $HOME/hyperspace.pem.backup
-            chmod 644 $HOME/hyperspace.pem.backup
-            aios-cli hive import-keys ./hyperspace.pem
-        fi
-        
-        echo -e "${BLUE}Вход в систему Hive...${NC}"
-        LOGIN_RESULT=$(aios-cli hive login 2>&1)
-        if echo "$LOGIN_RESULT" | grep -q "Failed to authenticate"; then
-            echo -e "${YELLOW}Ошибка аутентификации. Ожидаем 15 секунд перед повторной попыткой...${NC}"
             screen -X -S hyperspace quit
-            sleep 15
-            continue
-        fi
-        sleep 10
-        
-        echo -e "${BLUE}Подключаемся к Hive...${NC}"
-        CONNECT_RESULT=$(aios-cli hive connect 2>&1)
-        if echo "$CONNECT_RESULT" | grep -q "Failed to connect"; then
-            echo -e "${YELLOW}Ошибка подключения к Hive. Ожидаем 15 секунд перед повторной попыткой...${NC}"
-            sleep 15
-            continue
-        fi
-        sleep 10
-        
-        # Выбираем тир
-        echo -e "${BLUE}Выбираем тир...${NC}"
-        TIER_RESULT=$(aios-cli hive select-tier 3 2>&1)
-        if echo "$TIER_RESULT" | grep -q "Failed to select tier"; then
-            echo -e "${YELLOW}Ошибка выбора тира. Пробуем еще раз...${NC}"
             sleep 5
-            aios-cli hive select-tier 3
+            continue
         fi
-        sleep 5
         
         # Проверяем статус
         echo -e "${GREEN}Проверка статуса ноды после перезапуска:${NC}"
@@ -448,7 +419,45 @@ setup_restart_cron() {
 smart_monitor() {
     echo -e "${GREEN}Настройка умного мониторинга ноды...${NC}"
     
+    # Проверяем наличие необходимых файлов и директорий
+    if [ ! -f "$HOME/hyperspace.pem" ]; then
+        echo -e "${RED}ОШИБКА: Файл ключа не найден!${NC}"
+        echo -e "${YELLOW}Пожалуйста, сначала установите ноду и настройте ключ.${NC}"
+        return 1
+    fi
+    
+    # Проверяем наличие screen
+    if ! command -v screen &> /dev/null; then
+        echo -e "${RED}ОШИБКА: screen не установлен!${NC}"
+        echo -e "${YELLOW}Устанавливаем screen...${NC}"
+        sudo apt-get update && sudo apt-get install -y screen
+    fi
+    
+    # Останавливаем существующий процесс мониторинга
+    echo -e "${YELLOW}Останавливаем существующий процесс мониторинга...${NC}"
+    PIDS=$(ps aux | grep "[p]oints_monitor_hyperspace.sh" | awk '{print $2}')
+    for PID in $PIDS; do
+        kill -9 $PID 2>/dev/null
+        echo -e "${YELLOW}Остановлен процесс с PID $PID${NC}"
+    done
+    
+    # Очищаем старые логи
+    echo -e "${YELLOW}Очищаем старые логи...${NC}"
+    : > $HOME/smart_monitor.log
+    : > $HOME/points_monitor_hyperspace.log
+    
+    # Перезапускаем ноду перед запуском мониторинга
+    echo -e "${YELLOW}Выполняем перезапуск ноды перед запуском мониторинга...${NC}"
+    restart_node
+    
+    # Проверяем успешность перезапуска
+    if ! pgrep -f "aios" > /dev/null; then
+        echo -e "${RED}ОШИБКА: Не удалось запустить ноду!${NC}"
+        return 1
+    fi
+    
     # Создаем скрипт мониторинга
+    echo -e "${BLUE}Создаем скрипт мониторинга...${NC}"
     cat > $HOME/points_monitor_hyperspace.sh << 'EOL'
 #!/bin/bash
 LOG_FILE="$HOME/smart_monitor.log"
@@ -464,266 +473,96 @@ MAX_RESTART_COUNT=5  # Максимальное количество перез�
 RESTART_TIME=$(date +%s)  # Время последнего перезапуска
 HIVE_DOWN_COUNT=0
 MAX_HIVE_DOWN=3  # Максимальное количество ошибок Hive, прежде чем перезапустить
+LAST_SUCCESSFUL_CHECK=$(date +%s)  # Время последней успешной проверки
+MAX_CHECK_INTERVAL=7200  # Максимальный интервал между проверками (2 часа)
 
 # Добавляем правильный PATH
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios"
 
 log_message() {
     echo "$(date +"%Y-%m-%d %H:%M:%S"): $1" >> $LOG_FILE
+    echo -e "${YELLOW}$(date +"%Y-%m-%d %H:%M:%S"): $1${NC}"
 }
 
-# Функция для закрытия всех сессий screen с именем hyperspace
-kill_all_screens() {
-    log_message "Закрываем все существующие сессии screen hyperspace..."
-    screen -wipe >/dev/null 2>&1
-    screen -ls | grep hyperspace | cut -d. -f1 | xargs -r kill -9 >/dev/null 2>&1
-    screen -X -S hyperspace quit >/dev/null 2>&1
-    sleep 2
-}
-
-wait_for_daemon() {
-    local tries=0
-    local max_tries=30
-    
-    while [ $tries -lt $max_tries ]; do
-        if $HOME/.aios/aios-cli --version &>/dev/null; then
-            log_message "Демон успешно запущен после $tries попыток"
-            return 0
-        fi
-        log_message "Ожидание запуска демона (попытка $tries/$max_tries)..."
-        sleep 10
-        tries=$((tries + 1))
-    done
-    
-    log_message "Не удалось дождаться запуска демона после $max_tries попыток"
-    return 1
-}
-
-ensure_hive_connection() {
-    local retry=0
-    local max_retries=3
-    
-    while [ $retry -lt $max_retries ]; do
-        # Проверяем подключение к Hive
-        log_message "Проверка подключения к Hive (попытка $((retry+1))/$max_retries)..."
-        
-        # Пробуем получить статус точек
-        local connect_result=$($HOME/.aios/aios-cli hive connect 2>&1)
-        local points_result=$($HOME/.aios/aios-cli hive points 2>&1)
-        
-        if ! echo "$points_result" | grep -q "Failed"; then
-            log_message "Успешное подключение к Hive"
-            return 0
-        fi
-        
-        log_message "Проблема подключения к Hive. Попытка переподключения..."
-        $HOME/.aios/aios-cli hive login
-        sleep 5
-        $HOME/.aios/aios-cli hive connect
-        sleep 5
-        
-        retry=$((retry+1))
-        if [ $retry -lt $max_retries ]; then
-            log_message "Ожидание перед повторной попыткой ($retry/$max_retries)..."
-            sleep 30
-        fi
-    done
-    
-    log_message "Не удалось установить подключение к Hive после $max_retries попыток"
-    return 1
-}
-
-restart_node() {
-    log_message "Начинаем процедуру перезапуска ноды..."
-    
-    # Проверяем, не слишком ли часто перезапускаем
+# Функция для проверки времени последней успешной проверки
+check_last_successful_check() {
     current_time=$(date +%s)
-    time_diff=$((current_time - RESTART_TIME))
+    time_diff=$((current_time - LAST_SUCCESSFUL_CHECK))
     
-    # Если прошло менее 24 часов с последнего перезапуска
-    if [ $time_diff -lt 86400 ]; then
-        RESTART_COUNT=$((RESTART_COUNT + 1))
-        if [ $RESTART_COUNT -gt $MAX_RESTART_COUNT ]; then
-            log_message "ВНИМАНИЕ: Слишком много перезапусков за день ($RESTART_COUNT). Ожидаем 1 час перед следующей попыткой."
-            sleep 3600
-            RESTART_COUNT=0
-        fi
-    else
-        # Сбрасываем счетчик раз в день
-        RESTART_COUNT=1
+    if [ $time_diff -gt $MAX_CHECK_INTERVAL ]; then
+        log_message "ВНИМАНИЕ: Слишком долго не было успешных проверок ($time_diff секунд)"
+        log_message "Выполняем принудительный перезапуск..."
+        restart_node
+        LAST_SUCCESSFUL_CHECK=$(date +%s)
     fi
-    
-    RESTART_TIME=$(date +%s)
-    
-    # Максимальное количество попыток подключения к Hive
-    local MAX_HIVE_RETRIES=3
-    local hive_retry=0
-    local success=false
-    
-    # Полная остановка
-    log_message "Остановка всех процессов..."
-    pkill -f aios-cli
-    pkill -f aios
-    lsof -i :50051 | grep LISTEN | awk '{print $2}' | xargs -r kill -9
-    kill_all_screens
-    sleep 5
-    
-    # Очистка временных файлов и демона
-    log_message "Очистка временных файлов..."
-    rm -rf /tmp/aios*
-    rm -rf $HOME/.aios/daemon*
-    sleep 3
-    
-    # Проверяем и восстанавливаем ключ если нужно
-    if [ ! -f "$HOME/hyperspace.pem" ] && [ -f "$HOME/hyperspace.pem.backup" ]; then
-        log_message "Восстановление ключа из резервной копии..."
-        cp $HOME/hyperspace.pem.backup $HOME/hyperspace.pem
-        chmod 644 $HOME/hyperspace.pem
-    fi
-    
-    # Проверяем наличие ключа
-    if [ ! -f "$HOME/hyperspace.pem" ]; then
-        log_message "ОШИБКА: Файл ключа не найден! Перезапуск невозможен."
-        return 1
-    fi
-    
-    # Цикл попыток запуска и подключения
-    while [ $hive_retry -lt $MAX_HIVE_RETRIES ] && [ "$success" = false ]; do
-        hive_retry=$((hive_retry + 1))
-        log_message "Попытка запуска и подключения ($hive_retry из $MAX_HIVE_RETRIES)..."
-        
-        # Проверяем, нет ли уже запущенных screen-сессий
-        if screen -ls | grep -q hyperspace; then
-            log_message "Удаление существующих screen-сессий hyperspace..."
-            kill_all_screens
-        fi
-        
-        # Создаем новую сессию и запускаем ноду
-        log_message "Запуск новой сессии screen..."
-        screen -dmS hyperspace
-        sleep 2
-        
-        # Проверяем, создана ли сессия
-        if ! screen -ls | grep -q hyperspace; then
-            log_message "Не удалось создать screen-сессию. Повторная попытка..."
-            sleep 3
-            continue
-        fi
-        
-        screen -S hyperspace -p 0 -X stuff "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios\necho 'Запуск AIOS...'\n$HOME/.aios/aios-cli start\n"
-        sleep 20
-        
-        # Ждем запуска демона
-        log_message "Ожидаем запуск демона..."
-        if ! wait_for_daemon; then
-            log_message "ОШИБКА: Демон не запустился, пробуем еще раз..."
-            kill_all_screens
-            continue
-        fi
-        
-        # Проверяем статус демона
-        DAEMON_STATUS=$($HOME/.aios/aios-cli status 2>&1)
-        log_message "Статус демона: $DAEMON_STATUS"
-        
-        if ! echo "$DAEMON_STATUS" | grep -q "Daemon running"; then
-            log_message "Демон не запущен, повторная попытка..."
-            kill_all_screens
-            continue
-        fi
-        
-        # Импортируем ключи и подключаемся
-        log_message "Импорт ключей..."
-        $HOME/.aios/aios-cli hive import-keys ./hyperspace.pem
-        
-        log_message "Вход в аккаунт Hive..."
-        LOGIN_OUTPUT=$($HOME/.aios/aios-cli hive login 2>&1)
-        log_message "Результат входа: $LOGIN_OUTPUT"
-        sleep 10
-        
-        log_message "Подключение к Hive..."
-        CONNECT_OUTPUT=$($HOME/.aios/aios-cli hive connect 2>&1)
-        log_message "Результат подключения: $CONNECT_OUTPUT"
-        
-        if echo "$CONNECT_OUTPUT" | grep -q "Failed to connect"; then
-            log_message "Не удалось подключиться к Hive, возможно сервис временно недоступен. Ожидаем 30 секунд..."
-            sleep 30
-            continue
-        fi
-        
-        sleep 5
-        
-        log_message "Установка тира..."
-        TIER_OUTPUT=$($HOME/.aios/aios-cli hive select-tier 3 2>&1)
-        log_message "Результат установки тира: $TIER_OUTPUT"
-        sleep 5
-        
-        # Проверяем поинты, чтобы убедиться в успешном подключении
-        POINTS_OUTPUT=$($HOME/.aios/aios-cli hive points 2>&1)
-        if ! echo "$POINTS_OUTPUT" | grep -q "Failed"; then
-            log_message "Успешное подключение к Hive, поинты получены"
-            success=true
-        else
-            log_message "Не удалось получить поинты. Попытка $hive_retry не удалась."
-            
-            if [ $hive_retry -lt $MAX_HIVE_RETRIES ]; then
-                log_message "Ожидаем 30 секунд перед следующей попыткой..."
-                kill_all_screens
-                sleep 30
-            fi
-        fi
-    done
-    
-    if [ "$success" = true ]; then
-        log_message "Нода успешно перезапущена и подключена к Hive!"
-        HIVE_DOWN_COUNT=0  # Сбрасываем счетчик проблем с Hive
-    else
-        log_message "⚠️ Нода перезапущена, но есть проблемы с подключением к Hive"
-        log_message "Проверьте состояние ноды позже"
-    fi
-    
-    log_message "Процедура перезапуска завершена"
-    sleep 120  # Увеличиваем время ожидания после перезапуска до 2 минут
 }
 
-check_node_health() {
-    # Проверяем, запущен ли процесс aios
-    if ! pgrep -f "aios-cli start" > /dev/null && ! pgrep -f "aios" > /dev/null; then
-        log_message "Процесс aios не найден, требуется перезапуск"
+# Функция для проверки состояния системы
+check_system_state() {
+    # Проверяем свободное место на диске
+    DISK_SPACE=$(df -h / | awk 'NR==2 {print $5}' | sed 's/%//')
+    if [ "$DISK_SPACE" -gt 90 ]; then
+        log_message "ВНИМАНИЕ: Критически мало места на диске ($DISK_SPACE%)"
+    fi
+    
+    # Проверяем использование памяти
+    MEM_USAGE=$(free | grep Mem | awk '{print $3/$2 * 100.0}')
+    if (( $(echo "$MEM_USAGE > 90" | bc -l) )); then
+        log_message "ВНИМАНИЕ: Высокое использование памяти ($MEM_USAGE%)"
+    fi
+    
+    # Проверяем нагрузку на CPU
+    CPU_LOAD=$(cat /proc/loadavg | awk '{print $1}')
+    if (( $(echo "$CPU_LOAD > 5" | bc -l) )); then
+        log_message "ВНИМАНИЕ: Высокая нагрузка на CPU ($CPU_LOAD)"
+    fi
+}
+
+# Функция для проверки целостности файлов
+check_file_integrity() {
+    if [ ! -f "$HOME/hyperspace.pem" ]; then
+        log_message "ОШИБКА: Файл ключа не найден!"
+        if [ -f "$HOME/hyperspace.pem.backup" ]; then
+            log_message "Восстанавливаем ключ из резервной копии..."
+            cp $HOME/hyperspace.pem.backup $HOME/hyperspace.pem
+            chmod 644 $HOME/hyperspace.pem
+        else
+            log_message "КРИТИЧЕСКАЯ ОШИБКА: Резервная копия ключа также отсутствует!"
+            return 1
+        fi
+    fi
+    
+    if [ ! -f "$HOME/.aios/aios-cli" ]; then
+        log_message "ОШИБКА: aios-cli не найден!"
         return 1
     fi
     
-    # Проверяем порт 50051
-    if ! lsof -i :50051 | grep LISTEN > /dev/null; then
-        log_message "Порт 50051 не прослушивается, требуется перезапуск"
-        return 1
-    fi
-    
-    # Проверяем доступность aios-cli и его версию
-    AIOS_VERSION=$($HOME/.aios/aios-cli --version 2>&1)
-    if [ $? -ne 0 ]; then
-        log_message "Не удалось получить версию aios-cli: $AIOS_VERSION"
-        return 1
-    fi
-    
-    # Проверяем статус демона
-    DAEMON_STATUS=$($HOME/.aios/aios-cli status 2>&1)
-    if echo "$DAEMON_STATUS" | grep -q "Daemon not running"; then
-        log_message "Демон не запущен: $DAEMON_STATUS"
-        return 1
-    fi
-    
-    # Все проверки пройдены успешно
     return 0
 }
 
+# Основной цикл мониторинга
 while true; do
+    # Проверяем время последней успешной проверки
+    check_last_successful_check
+    
+    # Проверяем состояние системы
+    check_system_state
+    
+    # Проверяем целостность файлов
+    if ! check_file_integrity; then
+        log_message "КРИТИЧЕСКАЯ ОШИБКА: Проблемы с файлами системы"
+        sleep 300
+        continue
+    fi
+    
     # Проверяем здоровье ноды
     if ! check_node_health; then
+        log_message "Проблемы со здоровьем ноды, выполняем перезапуск..."
         restart_node
         LAST_POINTS="0"
         NAN_COUNT=0
         FAIL_COUNT=0
-        sleep 300  # Ждем 5 минут после перезапуска
+        sleep 300
         continue
     fi
     
@@ -738,7 +577,6 @@ while true; do
         
         log_message "Ошибка при получении поинтов: $POINTS_OUTPUT (Попытка $FAIL_COUNT/$MAX_FAIL_RETRIES, Hive Down: $HIVE_DOWN_COUNT/$MAX_HIVE_DOWN)"
         
-        # Если Hive сервис недоступен много раз подряд, считаем это серьезной проблемой
         if [ $HIVE_DOWN_COUNT -ge $MAX_HIVE_DOWN ]; then
             log_message "Серьезные проблемы с подключением к Hive, выполняем полный перезапуск..."
             restart_node
@@ -757,45 +595,40 @@ while true; do
             NAN_COUNT=0
             LAST_POINTS="0"
         else
-            # Пробуем переподключиться к Hive без полного перезапуска
             log_message "Пробуем переподключиться к Hive без полного перезапуска..."
             $HOME/.aios/aios-cli hive connect
             sleep 5
             
-            # Проверяем, помогло ли переподключение
             RECONNECT_POINTS=$($HOME/.aios/aios-cli hive points 2>&1)
             if ! echo "$RECONNECT_POINTS" | grep -q "Failed"; then
                 log_message "Переподключение помогло, поинты получены"
                 POINTS_OUTPUT=$RECONNECT_POINTS
                 FAIL_COUNT=0
                 HIVE_DOWN_COUNT=0
+                LAST_SUCCESSFUL_CHECK=$(date +%s)
             else
                 log_message "Переподключение не помогло, ожидаем следующей проверки"
-                # Уменьшаем интервал проверки при ошибке
-                sleep 300  # Проверяем через 5 минут
+                sleep 300
                 continue
             fi
         fi
     else
-        # Сбрасываем счетчики ошибок если получили нормальный ответ
         FAIL_COUNT=0
         HIVE_DOWN_COUNT=0
+        LAST_SUCCESSFUL_CHECK=$(date +%s)
     fi
     
     # Извлекаем значение поинтов
     CURRENT_POINTS=$(echo "$POINTS_OUTPUT" | grep "Points:" | awk '{print $2}')
     
-    # Проверяем, получили ли мы значение поинтов
     if [ -z "$CURRENT_POINTS" ]; then
         log_message "Не удалось получить значение поинтов, пропускаем итерацию"
         sleep 300
         continue
     fi
     
-    # Логируем текущее состояние
     log_message "Проверка поинтов: Текущие: $CURRENT_POINTS, Предыдущие: $LAST_POINTS"
     
-    # Обработка случая с NaN
     if [ "$CURRENT_POINTS" = "NaN" ]; then
         NAN_COUNT=$((NAN_COUNT + 1))
         log_message "Получено значение NaN ($NAN_COUNT/$MAX_NAN_RETRIES)"
@@ -807,16 +640,13 @@ while true; do
             FAIL_COUNT=0
             LAST_POINTS="0"
         else
-            # Уменьшаем интервал проверки при NaN
-            sleep 600  # Проверяем через 10 минут
+            sleep 600
             continue
         fi
     else
-        # Сбрасываем счетчик NaN если получили нормальное значение
         NAN_COUNT=0
     fi
     
-    # Проверяем, изменились ли поинты (только если не NaN)
     if [ "$CURRENT_POINTS" != "NaN" ] && [ "$LAST_POINTS" != "NaN" ] && [ "$LAST_POINTS" != "0" ]; then
         if [ "$CURRENT_POINTS" = "$LAST_POINTS" ]; then
             log_message "Поинты не изменились (Текущие: $CURRENT_POINTS, Предыдущие: $LAST_POINTS). Запускаем перезапуск..."
@@ -828,7 +658,6 @@ while true; do
         log_message "Пропускаем сравнение поинтов (первый запуск или NaN)"
     fi
     
-    # Обновляем последнее значение поинтов
     if [ "$CURRENT_POINTS" != "NaN" ]; then
         LAST_POINTS="$CURRENT_POINTS"
     fi
@@ -839,17 +668,6 @@ EOL
 
     chmod +x $HOME/points_monitor_hyperspace.sh
     
-    # Останавливаем существующий процесс мониторинга, если есть
-    PIDS=$(ps aux | grep "[p]oints_monitor_hyperspace.sh" | awk '{print $2}')
-    for PID in $PIDS; do
-        kill -9 $PID
-        echo -e "${YELLOW}Остановлен старый процесс мониторинга с PID $PID${NC}"
-    done
-    
-    # Перезапускаем ноду перед запуском мониторинга
-    echo -e "${YELLOW}Выполняем перезапуск ноды перед запуском мониторинга...${NC}"
-    restart_node
-    
     # Запускаем новый процесс мониторинга
     nohup $HOME/points_monitor_hyperspace.sh > $HOME/points_monitor_hyperspace.log 2>&1 &
     NEW_PID=$!
@@ -857,6 +675,15 @@ EOL
     echo -e "${GREEN}✅ Умный мониторинг успешно настроен! (PID: $NEW_PID)${NC}"
     echo -e "${YELLOW}Лог мониторинга: $HOME/smart_monitor.log${NC}"
     echo -e "${YELLOW}Лог процесса: $HOME/points_monitor_hyperspace.log${NC}"
+    
+    # Проверяем, что процесс действительно запущен
+    if ! ps -p $NEW_PID > /dev/null; then
+        echo -e "${RED}ОШИБКА: Не удалось запустить процесс мониторинга!${NC}"
+        echo -e "${YELLOW}Проверьте логи для подробностей.${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}✅ Процесс мониторинга успешно запущен и работает${NC}"
 }
 
 stop_monitor() {
