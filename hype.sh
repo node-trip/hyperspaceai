@@ -332,25 +332,24 @@ restart_node() {
         STATUS_RESULT=$($HOME/.aios/aios-cli status 2>&1)
         echo "$STATUS_RESULT"
         
-        # Проверяем, что демон запущен
+        # Проверяем, что демон запущен (это главное)
         if echo "$STATUS_RESULT" | grep -q "Daemon running"; then
-            # Проверяем, что можем получить поинты (признак успешного подключения)
+            success=true
+            echo -e "${GREEN}✅ Демон запущен успешно!${NC}"
+            
+            # Пробуем получить поинты, но это не критично для считания перезапуска успешным
             POINTS_RESULT=$($HOME/.aios/aios-cli hive points 2>&1)
             if ! echo "$POINTS_RESULT" | grep -q "Failed"; then
-                success=true
-                echo -e "${GREEN}✅ Подключение к Hive успешно установлено!${NC}"
+                echo -e "${GREEN}✅ Подключение к Hive успешно установлено, поинты получены!${NC}"
             else
-                echo -e "${YELLOW}Не удалось получить поинты. Будет выполнена еще одна попытка...${NC}"
+                echo -e "${YELLOW}Примечание: Не удалось получить поинты сразу после перезапуска, это нормально.${NC}"
+                echo -e "${YELLOW}Система попробует получить поинты позже в процессе мониторинга.${NC}"
             fi
-        fi
-        
-        if [ "$success" = false ]; then
-            # Если попытка неудачна, закрываем текущую сессию screen перед следующей попыткой
-            echo -e "${YELLOW}Закрываем неудачную сессию screen...${NC}"
+        else
+            echo -e "${RED}Демон не запущен, повторная попытка...${NC}"
             screen -X -S hyperspace quit >/dev/null 2>&1
-            
-            echo -e "${YELLOW}Попытка $hive_retry не удалась. Ожидаем 20 секунд...${NC}"
-            sleep 20
+            sleep 5
+            continue
         fi
     done
     
@@ -358,8 +357,8 @@ restart_node() {
         echo -e "${GREEN}✅ Нода успешно перезапущена!${NC}"
     else
         # Окончательная очистка в случае неудачи
-        echo -e "${RED}⚠️ Нода перезапущена, но есть проблемы с подключением к Hive.${NC}"
-        echo -e "${YELLOW}Рекомендуется проверить состояние ноды через некоторое время.${NC}"
+        echo -e "${RED}⚠️ Не удалось запустить ноду после $MAX_HIVE_RETRIES попыток.${NC}"
+        echo -e "${YELLOW}Рекомендуется проверить состояние системы и повторить попытку позже.${NC}"
     fi
 }
 
