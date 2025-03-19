@@ -234,8 +234,11 @@ restart_node() {
     # Принудительно останавливаем ВСЕ сессии с именем hyperspace
     echo -e "${BLUE}Закрываем все существующие сессии screen...${NC}"
     screen -wipe >/dev/null 2>&1
-    screen -ls | grep hyperspace | cut -d. -f1 | xargs -r kill -9
+    for pid in $(screen -ls | grep -E "hyperspace" | awk '{print $1}' | cut -d. -f1); do
+        kill -9 $pid >/dev/null 2>&1
+    done
     screen -X -S hyperspace quit >/dev/null 2>&1
+    sleep 5
     
     rm -rf /tmp/aios*
     rm -rf $HOME/.aios/daemon*
@@ -253,13 +256,32 @@ restart_node() {
         hive_retry=$((hive_retry + 1))
         echo -e "${BLUE}Попытка запуска и подключения ($hive_retry из $MAX_HIVE_RETRIES)...${NC}"
         
-        # Проверяем, что нет активных сессий hyperspace перед созданием новой
-        echo -e "${BLUE}Проверка наличия существующих сессий screen...${NC}"
-        if screen -ls | grep -q hyperspace; then
-            echo -e "${YELLOW}Обнаружены существующие сессии. Закрываем их...${NC}"
-            screen -ls | grep hyperspace | cut -d. -f1 | xargs -r kill -9
-            sleep 2
+        # Убеждаемся, что PATH настроен корректно
+        export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios
+        
+        # Проверяем наличие aios-cli
+        if [ ! -f "$HOME/.aios/aios-cli" ]; then
+            echo -e "${RED}aios-cli не найден в $HOME/.aios/aios-cli${NC}"
+            echo -e "${YELLOW}Содержимое директории .aios:${NC}"
+            ls -la $HOME/.aios
+            sleep 5
+            continue
         fi
+        
+        # Проверяем наличие прав на выполнение
+        if [ ! -x "$HOME/.aios/aios-cli" ]; then
+            echo -e "${YELLOW}Устанавливаем права на выполнение для aios-cli...${NC}"
+            chmod +x $HOME/.aios/aios-cli
+        fi
+        
+        # Закрываем все существующие сессии
+        echo -e "${BLUE}Проверка наличия существующих сессий screen...${NC}"
+        screen -wipe >/dev/null 2>&1
+        for pid in $(screen -ls | grep -E "hyperspace" | awk '{print $1}' | cut -d. -f1); do
+            kill -9 $pid >/dev/null 2>&1
+        done
+        screen -X -S hyperspace quit >/dev/null 2>&1
+        sleep 2
         
         # Создаём screen сессию для запуска ноды
         echo -e "${BLUE}Создаём новую сессию screen...${NC}"
@@ -274,13 +296,14 @@ restart_node() {
         fi
         
         # Отправляем команды в screen - запускаем демон и подключаемся к Hive всё в одной сессии
+        echo -e "${BLUE}Отправляем команды в screen сессию...${NC}"
         screen -S hyperspace -p 0 -X stuff "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios\necho 'Запуск AIOS...'\n$HOME/.aios/aios-cli start\n"
         sleep 20
         
         # Проверяем, запустился ли демон
         if ! pgrep -f "aios" > /dev/null; then
             echo -e "${RED}Демон не запустился. Повторная попытка...${NC}"
-            screen -X -S hyperspace quit
+            screen -X -S hyperspace quit >/dev/null 2>&1
             sleep 5
             continue
         fi
@@ -299,20 +322,20 @@ restart_node() {
             sleep 5
         else
             echo -e "${RED}Файл ключа не найден.${NC}"
-            screen -X -S hyperspace quit
+            screen -X -S hyperspace quit >/dev/null 2>&1
             sleep 5
             continue
         fi
         
         # Проверяем статус
         echo -e "${GREEN}Проверка статуса ноды после перезапуска:${NC}"
-        STATUS_RESULT=$(aios-cli status 2>&1)
+        STATUS_RESULT=$($HOME/.aios/aios-cli status 2>&1)
         echo "$STATUS_RESULT"
         
         # Проверяем, что демон запущен
         if echo "$STATUS_RESULT" | grep -q "Daemon running"; then
             # Проверяем, что можем получить поинты (признак успешного подключения)
-            POINTS_RESULT=$(aios-cli hive points 2>&1)
+            POINTS_RESULT=$($HOME/.aios/aios-cli hive points 2>&1)
             if ! echo "$POINTS_RESULT" | grep -q "Failed"; then
                 success=true
                 echo -e "${GREEN}✅ Подключение к Hive успешно установлено!${NC}"
@@ -479,9 +502,26 @@ MAX_CHECK_INTERVAL=7200  # Максимальный интервал между 
 # Добавляем правильный PATH
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios"
 
+# Определяем цвета для вывода
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
 log_message() {
     echo "$(date +"%Y-%m-%d %H:%M:%S"): $1" >> $LOG_FILE
     echo -e "${YELLOW}$(date +"%Y-%m-%d %H:%M:%S"): $1${NC}"
+}
+
+# Функция для закрытия всех сессий screen с именем hyperspace
+kill_all_screens() {
+    log_message "Закрываем все существующие сессии screen hyperspace..."
+    screen -wipe >/dev/null 2>&1
+    for pid in $(screen -ls | grep -E "hyperspace" | awk '{print $1}' | cut -d. -f1); do
+        kill -9 $pid >/dev/null 2>&1
+    done
+    screen -X -S hyperspace quit >/dev/null 2>&1
+    sleep 2
 }
 
 # Функция для проверки времени последней успешной проверки
@@ -537,6 +577,150 @@ check_file_integrity() {
         return 1
     fi
     
+    return 0
+}
+
+# Функция для перезапуска ноды
+restart_node() {
+    log_message "Начинаем процедуру перезапуска ноды..."
+    
+    # Проверяем, не слишком ли часто перезапускаем
+    current_time=$(date +%s)
+    time_diff=$((current_time - RESTART_TIME))
+    
+    # Если прошло менее 24 часов с последнего перезапуска
+    if [ $time_diff -lt 86400 ]; then
+        RESTART_COUNT=$((RESTART_COUNT + 1))
+        if [ $RESTART_COUNT -gt $MAX_RESTART_COUNT ]; then
+            log_message "ВНИМАНИЕ: Слишком много перезапусков за день ($RESTART_COUNT). Ожидаем 1 час перед следующей попыткой."
+            sleep 3600
+            RESTART_COUNT=0
+        fi
+    else
+        # Сбрасываем счетчик раз в день
+        RESTART_COUNT=1
+    fi
+    
+    RESTART_TIME=$(date +%s)
+    
+    # Максимальное количество попыток подключения к Hive
+    local MAX_HIVE_RETRIES=3
+    local hive_retry=0
+    local success=false
+    
+    # Полная остановка
+    log_message "Остановка всех процессов..."
+    pkill -f aios-cli
+    pkill -f aios
+    lsof -i :50051 | grep LISTEN | awk '{print $2}' | xargs -r kill -9
+    kill_all_screens
+    sleep 5
+    
+    # Очистка временных файлов и демона
+    log_message "Очистка временных файлов..."
+    rm -rf /tmp/aios*
+    rm -rf $HOME/.aios/daemon*
+    sleep 3
+    
+    # Цикл попыток запуска и подключения
+    while [ $hive_retry -lt $MAX_HIVE_RETRIES ] && [ "$success" = false ]; do
+        hive_retry=$((hive_retry + 1))
+        log_message "Попытка запуска и подключения ($hive_retry из $MAX_HIVE_RETRIES)..."
+        
+        # Проверяем, нет ли уже запущенных screen-сессий
+        kill_all_screens
+        
+        # Создаем новую сессию и запускаем ноду
+        log_message "Запуск новой сессии screen..."
+        screen -dmS hyperspace
+        sleep 2
+        
+        # Проверяем, создана ли сессия
+        if ! screen -ls | grep -q hyperspace; then
+            log_message "Не удалось создать screen-сессию. Повторная попытка..."
+            sleep 3
+            continue
+        fi
+        
+        # Отправляем команды в screen
+        screen -S hyperspace -p 0 -X stuff "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios\necho 'Запуск AIOS...'\n$HOME/.aios/aios-cli start\n"
+        sleep 20
+        
+        # Проверяем, запустился ли демон
+        if ! pgrep -f "aios" > /dev/null; then
+            log_message "ОШИБКА: Демон не запустился, пробуем еще раз..."
+            kill_all_screens
+            continue
+        fi
+        
+        # Добавляем команды для подключения к Hive в screen
+        log_message "Выполняем команды подключения к Hive внутри screen..."
+        screen -S hyperspace -p 0 -X stuff "sleep 5\n$HOME/.aios/aios-cli hive import-keys ./hyperspace.pem\n"
+        sleep 3
+        screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli hive login\n"
+        sleep 10
+        screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli hive connect\n"
+        sleep 10
+        screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli hive select-tier 3\n"
+        sleep 5
+        
+        # Проверяем поинты напрямую, чтобы убедиться в успешном подключении
+        POINTS_OUTPUT=$($HOME/.aios/aios-cli hive points 2>&1)
+        if ! echo "$POINTS_OUTPUT" | grep -q "Failed"; then
+            log_message "Успешное подключение к Hive, поинты получены"
+            success=true
+        else
+            log_message "Не удалось получить поинты. Попытка $hive_retry не удалась."
+            
+            if [ $hive_retry -lt $MAX_HIVE_RETRIES ]; then
+                log_message "Ожидаем 30 секунд перед следующей попыткой..."
+                kill_all_screens
+                sleep 30
+            fi
+        fi
+    done
+    
+    if [ "$success" = true ]; then
+        log_message "Нода успешно перезапущена и подключена к Hive!"
+        HIVE_DOWN_COUNT=0  # Сбрасываем счетчик проблем с Hive
+    else
+        log_message "⚠️ Нода перезапущена, но есть проблемы с подключением к Hive"
+        log_message "Проверьте состояние ноды позже"
+    fi
+    
+    log_message "Процедура перезапуска завершена"
+    sleep 120  # Увеличиваем время ожидания после перезапуска до 2 минут
+}
+
+# Функция для проверки здоровья ноды
+check_node_health() {
+    # Проверяем, запущен ли процесс aios
+    if ! pgrep -f "aios-cli start" > /dev/null && ! pgrep -f "aios" > /dev/null; then
+        log_message "Процесс aios не найден, требуется перезапуск"
+        return 1
+    fi
+    
+    # Проверяем порт 50051
+    if ! lsof -i :50051 | grep LISTEN > /dev/null; then
+        log_message "Порт 50051 не прослушивается, требуется перезапуск"
+        return 1
+    fi
+    
+    # Проверяем доступность aios-cli и его версию
+    AIOS_VERSION=$($HOME/.aios/aios-cli --version 2>&1)
+    if [ $? -ne 0 ]; then
+        log_message "Не удалось получить версию aios-cli: $AIOS_VERSION"
+        return 1
+    fi
+    
+    # Проверяем статус демона
+    DAEMON_STATUS=$($HOME/.aios/aios-cli status 2>&1)
+    if echo "$DAEMON_STATUS" | grep -q "Daemon not running"; then
+        log_message "Демон не запущен: $DAEMON_STATUS"
+        return 1
+    fi
+    
+    # Все проверки пройдены успешно
     return 0
 }
 
@@ -765,6 +949,17 @@ NC='\033[0m'
 
 echo -e "${YELLOW}Текущая дата и время: $(date)${NC}"
 echo -e "${YELLOW}Проверка PATH: $PATH${NC}"
+
+# Убеждаемся, что PATH настроен корректно
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios"
+
+# Проверяем наличие aios-cli
+if [ ! -f "$HOME/.aios/aios-cli" ]; then
+    echo -e "${RED}aios-cli не найден в $HOME/.aios/aios-cli${NC}"
+    echo -e "${YELLOW}Содержимое директории .aios:${NC}"
+    ls -la $HOME/.aios
+    exit 1
+fi
 
 # Проверяем поинты
 echo -e "${YELLOW}Выполняем команду: $HOME/.aios/aios-cli hive points${NC}"
