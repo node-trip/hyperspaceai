@@ -173,9 +173,8 @@ restart_node() {
     screen -S hyperspace -p 0 -X stuff $'export PATH=$PATH:$HOME/.aios\naios-cli start\n'
     sleep 5
     
-    # Аутентификация и подключение к Hive
+    # Аутентификация и подключение к Hive с повторными попытками
     echo -e "${BLUE}Аутентификация в Hive...${NC}"
-    # Проверяем, существует ли файл ключа
     export PATH=$PATH:$HOME/.aios
     if [ -f "$HOME/hyperspace.pem" ]; then
         echo -e "${GREEN}Импортируем ключ...${NC}"
@@ -193,23 +192,45 @@ restart_node() {
     fi
     
     echo -e "${BLUE}Вход в систему Hive...${NC}"
-    aios-cli hive login
-    sleep 5
+    for i in {1..5}; do
+        if aios-cli hive login; then
+            echo -e "${GREEN}Успешный вход в систему Hive${NC}"
+            break
+        else
+            echo -e "${RED}Не удалось войти в систему Hive. Повторная попытка через 5 секунд...${NC}"
+            sleep 5
+        fi
+    done
     
     echo -e "${BLUE}Подключаемся к Hive...${NC}"
-    aios-cli hive connect
-    sleep 5
+    for i in {1..5}; do
+        if aios-cli hive connect; then
+            echo -e "${GREEN}Успешное подключение к Hive${NC}"
+            break
+        else
+            echo -e "${RED}Не удалось подключиться к Hive. Повторная попытка через 5 секунд...${NC}"
+            sleep 5
+        fi
+    done
     
-    # Выбираем тир
+    # Выбираем тир с повторными попытками
     echo -e "${BLUE}Выбираем тир...${NC}"
-    aios-cli hive select-tier 3
-    sleep 3
+    for i in {1..5}; do
+        if aios-cli hive select-tier 3; then
+            echo -e "${GREEN}Успешно выбран тир${NC}"
+            break
+        else
+            echo -e "${RED}Не удалось выбрать тир. Повторная попытка через 5 секунд...${NC}"
+            sleep 5
+        fi
+    done
     
     # Проверяем статус
     echo -e "${GREEN}Проверка статуса ноды после перезапуска:${NC}"
     aios-cli status
     
     echo -e "${GREEN}✅ Нода перезапущена!${NC}"
+
 }
 
 setup_restart_cron() {
