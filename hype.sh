@@ -36,30 +36,98 @@ create_key_file() {
 install_node() {
     echo -e "${GREEN}Обновление системы...${NC}"
     sudo apt update && sudo apt upgrade -y
+    sudo apt install -y nano screen curl wget
     cd $HOME
     rm -rf $HOME/.cache/hyperspace/models/*
     sleep 5
 
-    echo -e "${GREEN}🚀 Установка HyperSpace CLI...${NC}"
-    while true; do
-        curl -s https://download.hyper.space/api/install | bash | tee /root/hyperspace_install.log
-
-        if ! grep -q "Failed to parse version from release data." /root/hyperspace_install.log; then
-            echo -e "${GREEN}✅ HyperSpace CLI установлен успешно!${NC}"
-            break
-        else
-            echo -e "${RED}❌ Установка не удалась. Повторная попытка через 5 секунд...${NC}"
-            sleep 5
-        fi
-    done
-
     echo -e "${GREEN}🚀 Установка AIOS...${NC}"
-    echo 'export PATH=$PATH:$HOME/.aios' >> ~/.bashrc
+    
+    # Создаем директорию .aios если её нет
+    mkdir -p $HOME/.aios
+
+    # Определяем архитектуру системы
+    ARCH=$(uname -m)
+    echo -e "${YELLOW}Определена архитектура: $ARCH${NC}"
+    
+    # Выбираем соответствующий URL в зависимости от архитектуры
+    if [ "$ARCH" = "x86_64" ]; then
+        # URL для x86_64 (стандартные Intel/AMD процессоры)
+        AIOS_URL="https://github.com/second-state/aios/releases/download/v0.1.6/aios-cli-linux-amd64"
+    elif [ "$ARCH" = "aarch64" ]; then
+        # URL для ARM64 (например, AWS Graviton)
+        AIOS_URL="https://github.com/second-state/aios/releases/download/v0.1.6/aios-cli-linux-arm64"
+    else
+        echo -e "${RED}❌ Неподдерживаемая архитектура: $ARCH${NC}"
+        return 1
+    fi
+    
+    # Загружаем aios-cli напрямую из репозитория с явным указанием версии
+    echo -e "${YELLOW}Загрузка aios-cli с URL: $AIOS_URL${NC}"
+    curl -L $AIOS_URL -o $HOME/.aios/aios-cli || wget -O $HOME/.aios/aios-cli $AIOS_URL
+    
+    # Проверяем размер файла
+    FILE_SIZE=$(stat -c%s "$HOME/.aios/aios-cli")
+    echo -e "${YELLOW}Размер загруженного файла: $FILE_SIZE байт${NC}"
+    
+    # Если файл слишком маленький, вероятно произошла ошибка
+    if [ $FILE_SIZE -lt 1000000 ]; then  # Ожидаем файл размером более 1MB
+        echo -e "${RED}❌ Подозрительно маленький размер файла. Проверка содержимого:${NC}"
+        cat $HOME/.aios/aios-cli
+        echo ""
+        echo -e "${RED}❌ Попробуем другой метод установки...${NC}"
+        
+        # Пробуем использовать официальный установщик
+        echo -e "${YELLOW}Пробуем официальный установщик...${NC}"
+        curl -s https://download.hyper.space/api/install | bash
+        
+        # Проверяем, создался ли aios-cli после запуска установщика
+        if [ -f "$HOME/.aios/aios-cli" ]; then
+            FILE_SIZE=$(stat -c%s "$HOME/.aios/aios-cli")
+            echo -e "${YELLOW}Размер файла после официального установщика: $FILE_SIZE байт${NC}"
+            
+            if [ $FILE_SIZE -lt 1000000 ]; then
+                echo -e "${RED}❌ Установка не удалась. Файл слишком маленький.${NC}"
+                return 1
+            fi
+        else
+            echo -e "${RED}❌ Файл aios-cli не найден после запуска установщика.${NC}"
+            return 1
+        fi
+    fi
+
+    # Делаем файл исполняемым
+    chmod +x $HOME/.aios/aios-cli
+
+    # Проверяем исполняемость файла
+    echo -e "${YELLOW}Проверка типа файла:${NC}"
+    file $HOME/.aios/aios-cli
+
+    # Добавляем путь в .bashrc
+    if ! grep -q "export PATH=\$PATH:\$HOME/.aios" ~/.bashrc; then
+        echo 'export PATH=$PATH:$HOME/.aios' >> ~/.bashrc
+    fi
+
+    # Обновляем PATH в текущей сессии
     export PATH=$PATH:$HOME/.aios
     source ~/.bashrc
 
+    # Проверяем, что aios-cli доступен
+    if ! $HOME/.aios/aios-cli --version &> /dev/null; then
+        echo -e "${RED}❌ aios-cli не работает. Проверяем состояние...${NC}"
+        echo -e "${YELLOW}Текущий PATH: $PATH${NC}"
+        echo -e "${YELLOW}Содержимое директории .aios:${NC}"
+        ls -la $HOME/.aios
+        echo -e "${YELLOW}Проверяем права доступа:${NC}"
+        ls -l $HOME/.aios/aios-cli
+        return 1
+    else
+        echo -e "${GREEN}✅ aios-cli работает корректно${NC}"
+    fi
+
+    echo -e "${GREEN}Запуск демона...${NC}"
     screen -S hyperspace -dm
-    screen -S hyperspace -p 0 -X stuff $'aios-cli start\n'
+    screen -S hyperspace -p 0 -X stuff $'$HOME/.aios/aios-cli start\n'
     sleep 5
 
     echo -e "${GREEN}Создание файла приватного ключа...${NC}"
@@ -74,21 +142,21 @@ install_node() {
         chmod 644 $HOME/hyperspace.pem.backup
     fi
 
-    aios-cli hive import-keys ./hyperspace.pem
+    $HOME/.aios/aios-cli hive import-keys ./hyperspace.pem
 
     echo -e "${GREEN}🔑 Вход в систему...${NC}"
-    aios-cli hive login
+    $HOME/.aios/aios-cli hive login
     sleep 5
 
     echo -e "${GREEN}Загрузка модели...${NC}"
-    aios-cli models add hf:second-state/Qwen1.5-1.8B-Chat-GGUF:Qwen1.5-1.8B-Chat-Q4_K_M.gguf
+    $HOME/.aios/aios-cli models add hf:second-state/Qwen1.5-1.8B-Chat-GGUF:Qwen1.5-1.8B-Chat-Q4_K_M.gguf
 
     echo -e "${GREEN}Подключение к системе...${NC}"
-    aios-cli hive connect
-    aios-cli hive select-tier 3
+    $HOME/.aios/aios-cli hive connect
+    $HOME/.aios/aios-cli hive select-tier 3
 
     echo -e "${GREEN}🔍 Проверка статуса ноды...${NC}"
-    aios-cli status
+    $HOME/.aios/aios-cli status
 
     echo -e "${GREEN}✅ Установка завершена!${NC}"
 }
@@ -302,52 +370,140 @@ MAX_NAN_RETRIES=3
 CHECK_INTERVAL=3600  # Проверка каждый час по умолчанию
 FAIL_COUNT=0
 MAX_FAIL_RETRIES=2  # Максимальное количество ошибок подряд
+RESTART_COUNT=0
+MAX_RESTART_COUNT=5  # Максимальное количество перезапусков в течение дня
+RESTART_TIME=$(date +%s)  # Время последнего перезапуска
 
 # Добавляем правильный PATH
-export PATH="$PATH:$HOME/.aios"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios"
 
 log_message() {
     echo "$(date +"%Y-%m-%d %H:%M:%S"): $1" >> $LOG_FILE
 }
 
+wait_for_daemon() {
+    local tries=0
+    local max_tries=30
+    
+    while [ $tries -lt $max_tries ]; do
+        if $HOME/.aios/aios-cli --version &>/dev/null; then
+            log_message "Демон успешно запущен после $tries попыток"
+            return 0
+        fi
+        log_message "Ожидание запуска демона (попытка $tries/$max_tries)..."
+        sleep 10
+        tries=$((tries + 1))
+    done
+    
+    log_message "Не удалось дождаться запуска демона после $max_tries попыток"
+    return 1
+}
+
 restart_node() {
     log_message "Начинаем процедуру перезапуска ноды..."
     
-    # Используем тот же метод перезапуска, что и при ручном режиме
+    # Проверяем, не слишком ли часто перезапускаем
+    current_time=$(date +%s)
+    time_diff=$((current_time - RESTART_TIME))
+    
+    # Если прошло менее 24 часов с последнего перезапуска
+    if [ $time_diff -lt 86400 ]; then
+        RESTART_COUNT=$((RESTART_COUNT + 1))
+        if [ $RESTART_COUNT -gt $MAX_RESTART_COUNT ]; then
+            log_message "ВНИМАНИЕ: Слишком много перезапусков за день ($RESTART_COUNT). Ожидаем 1 час перед следующей попыткой."
+            sleep 3600
+            RESTART_COUNT=0
+        fi
+    else
+        # Сбрасываем счетчик раз в день
+        RESTART_COUNT=1
+    fi
+    
+    RESTART_TIME=$(date +%s)
+    
+    # Полная остановка
+    log_message "Остановка всех процессов..."
+    pkill -f aios-cli
+    pkill -f aios
     lsof -i :50051 | grep LISTEN | awk '{print $2}' | xargs -r kill -9
-    rm -rf /tmp/aios*
-    rm -rf $HOME/.aios/daemon*
     screen -X -S hyperspace quit
     sleep 5
     
+    # Очистка временных файлов и демона
+    log_message "Очистка временных файлов..."
+    rm -rf /tmp/aios*
+    rm -rf $HOME/.aios/daemon*
+    sleep 3
+    
     # Проверяем и восстанавливаем ключ если нужно
     if [ ! -f "$HOME/hyperspace.pem" ] && [ -f "$HOME/hyperspace.pem.backup" ]; then
+        log_message "Восстановление ключа из резервной копии..."
         cp $HOME/hyperspace.pem.backup $HOME/hyperspace.pem
+        chmod 644 $HOME/hyperspace.pem
+    fi
+    
+    # Проверяем наличие ключа
+    if [ ! -f "$HOME/hyperspace.pem" ]; then
+        log_message "ОШИБКА: Файл ключа не найден! Перезапуск невозможен."
+        return 1
     fi
     
     # Создаем новую сессию и запускаем ноду
+    log_message "Запуск новой сессии screen..."
     screen -S hyperspace -dm
-    screen -S hyperspace -p 0 -X stuff "export PATH=$PATH:$HOME/.aios\naios-cli start\n"
-    sleep 10
+    screen -S hyperspace -p 0 -X stuff "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios\necho 'Запуск AIOS...'\n$HOME/.aios/aios-cli start\n"
+    sleep 20
+    
+    # Ждем запуска демона
+    log_message "Ожидаем запуск демона..."
+    if ! wait_for_daemon; then
+        log_message "ОШИБКА: Демон не запустился, пробуем еще раз..."
+        screen -X -S hyperspace quit
+        sleep 5
+        screen -S hyperspace -dm
+        screen -S hyperspace -p 0 -X stuff "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios\necho 'Повторный запуск AIOS...'\n$HOME/.aios/aios-cli start\n"
+        sleep 30
+        
+        if ! wait_for_daemon; then
+            log_message "КРИТИЧЕСКАЯ ОШИБКА: Демон не запустился после повторной попытки!"
+            return 1
+        fi
+    fi
+    
+    # Проверяем статус демона
+    DAEMON_STATUS=$($HOME/.aios/aios-cli status 2>&1)
+    log_message "Статус демона: $DAEMON_STATUS"
     
     # Импортируем ключи и подключаемся
-    export PATH=$PATH:$HOME/.aios
-    aios-cli hive import-keys ./hyperspace.pem
-    aios-cli hive login
+    log_message "Импорт ключей..."
+    $HOME/.aios/aios-cli hive import-keys ./hyperspace.pem
+    
+    log_message "Вход в аккаунт Hive..."
+    LOGIN_OUTPUT=$($HOME/.aios/aios-cli hive login 2>&1)
+    log_message "Результат входа: $LOGIN_OUTPUT"
     sleep 10
-    aios-cli hive connect
+    
+    log_message "Подключение к Hive..."
+    CONNECT_OUTPUT=$($HOME/.aios/aios-cli hive connect 2>&1)
+    log_message "Результат подключения: $CONNECT_OUTPUT"
     sleep 5
-    aios-cli hive select-tier 3
+    
+    log_message "Установка тира..."
+    TIER_OUTPUT=$($HOME/.aios/aios-cli hive select-tier 3 2>&1)
+    log_message "Результат установки тира: $TIER_OUTPUT"
     sleep 5
-    aios-cli status
+    
+    log_message "Проверка финального статуса..."
+    FINAL_STATUS=$($HOME/.aios/aios-cli status 2>&1)
+    log_message "Финальный статус: $FINAL_STATUS"
     
     log_message "Процедура перезапуска завершена"
-    sleep 60  # Увеличиваем время ожидания после перезапуска
+    sleep 120  # Увеличиваем время ожидания после перезапуска до 2 минут
 }
 
 check_node_health() {
     # Проверяем, запущен ли процесс aios
-    if ! pgrep -f "aios" > /dev/null; then
+    if ! pgrep -f "aios-cli start" > /dev/null && ! pgrep -f "aios" > /dev/null; then
         log_message "Процесс aios не найден, требуется перезапуск"
         return 1
     fi
@@ -358,19 +514,21 @@ check_node_health() {
         return 1
     fi
     
-    # Проверяем доступность aios-cli
-    if ! command -v aios-cli &> /dev/null; then
-        log_message "aios-cli не найден в PATH"
+    # Проверяем доступность aios-cli и его версию
+    AIOS_VERSION=$($HOME/.aios/aios-cli --version 2>&1)
+    if [ $? -ne 0 ]; then
+        log_message "Не удалось получить версию aios-cli: $AIOS_VERSION"
         return 1
     fi
     
-    # Проверяем подключение к Hive
-    HIVE_STATUS=$($HOME/.aios/aios-cli hive connect 2>&1)
-    if echo "$HIVE_STATUS" | grep -q "error"; then
-        log_message "Проблема с подключением к Hive: $HIVE_STATUS"
+    # Проверяем статус демона
+    DAEMON_STATUS=$($HOME/.aios/aios-cli status 2>&1)
+    if echo "$DAEMON_STATUS" | grep -q "Daemon not running"; then
+        log_message "Демон не запущен: $DAEMON_STATUS"
         return 1
     fi
     
+    # Все проверки пройдены успешно
     return 0
 }
 
@@ -387,6 +545,7 @@ while true; do
     
     # Получаем текущие поинты
     POINTS_OUTPUT=$($HOME/.aios/aios-cli hive points 2>&1)
+    log_message "Вывод команды points: $POINTS_OUTPUT"
     
     # Проверяем наличие ошибок в выводе команды
     if echo "$POINTS_OUTPUT" | grep -q "Failed to fetch points" || echo "$POINTS_OUTPUT" | grep -q "error"; then
@@ -400,6 +559,11 @@ while true; do
             NAN_COUNT=0
             LAST_POINTS="0"
         else
+            # Пробуем переподключиться к Hive без перезапуска
+            log_message "Пробуем переподключиться к Hive без полного перезапуска..."
+            $HOME/.aios/aios-cli hive connect
+            sleep 5
+            
             # Уменьшаем интервал проверки при ошибке
             sleep 300  # Проверяем через 5 минут
             continue
@@ -473,10 +637,15 @@ EOL
         echo -e "${YELLOW}Остановлен старый процесс мониторинга с PID $PID${NC}"
     done
     
+    # Перезапускаем ноду перед запуском мониторинга
+    echo -e "${YELLOW}Выполняем перезапуск ноды перед запуском мониторинга...${NC}"
+    restart_node
+    
     # Запускаем новый процесс мониторинга
     nohup $HOME/points_monitor_hyperspace.sh > $HOME/points_monitor_hyperspace.log 2>&1 &
+    NEW_PID=$!
     
-    echo -e "${GREEN}✅ Умный мониторинг успешно настроен!${NC}"
+    echo -e "${GREEN}✅ Умный мониторинг успешно настроен! (PID: $NEW_PID)${NC}"
     echo -e "${YELLOW}Лог мониторинга: $HOME/smart_monitor.log${NC}"
     echo -e "${YELLOW}Лог процесса: $HOME/points_monitor_hyperspace.log${NC}"
 }
