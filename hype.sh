@@ -251,6 +251,29 @@ restart_node() {
         chmod 644 $HOME/hyperspace.pem
     fi
     
+    # Создаем временный скрипт запуска для выполнения в screen
+    cat > $HOME/hyperspace_startup.sh << 'EOLS'
+#!/bin/bash
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios
+echo "Запуск AIOS..."
+$HOME/.aios/aios-cli start
+sleep 20
+echo "Импорт ключей..."
+$HOME/.aios/aios-cli hive import-keys ./hyperspace.pem
+sleep 5
+echo "Аутентификация в Hive..."
+$HOME/.aios/aios-cli hive login
+sleep 10
+echo "Подключение к Hive..."
+$HOME/.aios/aios-cli hive connect
+sleep 10
+echo "Выбор тира 3..."
+$HOME/.aios/aios-cli hive select-tier 3
+sleep 5
+echo "Настройка завершена. Нода работает."
+EOLS
+    chmod +x $HOME/hyperspace_startup.sh
+    
     # Цикл попыток запуска и подключения
     while [ $hive_retry -lt $MAX_HIVE_RETRIES ] && [ "$success" = false ]; do
         hive_retry=$((hive_retry + 1))
@@ -283,9 +306,9 @@ restart_node() {
         screen -X -S hyperspace quit >/dev/null 2>&1
         sleep 2
         
-        # Создаём screen сессию для запуска ноды
+        # Создаём и запускаем screen с нашим скриптом запуска
         echo -e "${BLUE}Создаём новую сессию screen...${NC}"
-        screen -dmS hyperspace
+        screen -dmS hyperspace $HOME/hyperspace_startup.sh
         sleep 2
         
         # Проверяем, что сессия успешно создана
@@ -295,37 +318,9 @@ restart_node() {
             continue
         fi
         
-        # Отправляем команды в screen - запускаем демон и подключаемся к Hive всё в одной сессии
-        echo -e "${BLUE}Отправляем команды в screen сессию...${NC}"
-        screen -S hyperspace -p 0 -X stuff "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios\necho 'Запуск AIOS...'\n$HOME/.aios/aios-cli start\n"
-        sleep 20
-        
-        # Проверяем, запустился ли демон
-        if ! pgrep -f "aios" > /dev/null; then
-            echo -e "${RED}Демон не запустился. Повторная попытка...${NC}"
-            screen -X -S hyperspace quit >/dev/null 2>&1
-            sleep 5
-            continue
-        fi
-        
-        # Аутентификация и подключение к Hive также в screen
-        echo -e "${BLUE}Аутентификация и подключение в Hive в screen сессии...${NC}"
-        if [ -f "$HOME/hyperspace.pem" ]; then
-            # Добавляем команды для выполнения внутри screen
-            screen -S hyperspace -p 0 -X stuff "sleep 5\n$HOME/.aios/aios-cli hive import-keys ./hyperspace.pem\n"
-            sleep 3
-            screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli hive login\n"
-            sleep 10
-            screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli hive connect\n"
-            sleep 10
-            screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli hive select-tier 3\n"
-            sleep 5
-        else
-            echo -e "${RED}Файл ключа не найден.${NC}"
-            screen -X -S hyperspace quit >/dev/null 2>&1
-            sleep 5
-            continue
-        fi
+        # Даём время для запуска и инициализации
+        echo -e "${BLUE}Ожидаем запуск демона и инициализацию (60 секунд)...${NC}"
+        sleep 60
         
         # Проверяем статус
         echo -e "${GREEN}Проверка статуса ноды после перезапуска:${NC}"
@@ -360,6 +355,9 @@ restart_node() {
         echo -e "${RED}⚠️ Не удалось запустить ноду после $MAX_HIVE_RETRIES попыток.${NC}"
         echo -e "${YELLOW}Рекомендуется проверить состояние системы и повторить попытку позже.${NC}"
     fi
+    
+    # Удаляем временный скрипт запуска
+    rm -f $HOME/hyperspace_startup.sh
 }
 
 setup_restart_cron() {
@@ -621,6 +619,30 @@ restart_node() {
     rm -rf $HOME/.aios/daemon*
     sleep 3
     
+    # Создание временного скрипта запуска
+    log_message "Создаем временный скрипт запуска..."
+    cat > $HOME/hyperspace_restart_temp.sh << 'EOLT'
+#!/bin/bash
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios
+echo "Запуск AIOS..."
+$HOME/.aios/aios-cli start
+sleep 20
+echo "Импорт ключей..."
+$HOME/.aios/aios-cli hive import-keys ./hyperspace.pem
+sleep 5
+echo "Аутентификация в Hive..."
+$HOME/.aios/aios-cli hive login
+sleep 10
+echo "Подключение к Hive..."
+$HOME/.aios/aios-cli hive connect
+sleep 10
+echo "Выбор тира 3..."
+$HOME/.aios/aios-cli hive select-tier 3
+sleep 5
+echo "Настройка завершена. Нода работает."
+EOLT
+    chmod +x $HOME/hyperspace_restart_temp.sh
+    
     # Цикл попыток запуска и подключения
     while [ $hive_retry -lt $MAX_HIVE_RETRIES ] && [ "$success" = false ]; do
         hive_retry=$((hive_retry + 1))
@@ -629,9 +651,9 @@ restart_node() {
         # Проверяем, нет ли уже запущенных screen-сессий
         kill_all_screens
         
-        # Создаем новую сессию и запускаем ноду
+        # Создаем новую сессию и запускаем ноду с помощью нашего скрипта
         log_message "Запуск новой сессии screen..."
-        screen -dmS hyperspace
+        screen -dmS hyperspace $HOME/hyperspace_restart_temp.sh
         sleep 2
         
         # Проверяем, создана ли сессия
@@ -641,35 +663,27 @@ restart_node() {
             continue
         fi
         
-        # Отправляем команды в screen
-        screen -S hyperspace -p 0 -X stuff "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.aios\necho 'Запуск AIOS...'\n$HOME/.aios/aios-cli start\n"
-        sleep 20
-        
-        # Проверяем, запустился ли демон
-        if ! pgrep -f "aios" > /dev/null; then
-            log_message "ОШИБКА: Демон не запустился, пробуем еще раз..."
-            kill_all_screens
-            continue
-        fi
-        
-        # Добавляем команды для подключения к Hive в screen
-        log_message "Выполняем команды подключения к Hive внутри screen..."
-        screen -S hyperspace -p 0 -X stuff "sleep 5\n$HOME/.aios/aios-cli hive import-keys ./hyperspace.pem\n"
-        sleep 3
-        screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli hive login\n"
-        sleep 10
-        screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli hive connect\n"
-        sleep 10
-        screen -S hyperspace -p 0 -X stuff "$HOME/.aios/aios-cli hive select-tier 3\n"
-        sleep 5
+        # Даем время для выполнения скрипта
+        log_message "Ждем завершения инициализации (60 секунд)..."
+        sleep 60
         
         # Проверяем поинты напрямую, чтобы убедиться в успешном подключении
         POINTS_OUTPUT=$($HOME/.aios/aios-cli hive points 2>&1)
-        if ! echo "$POINTS_OUTPUT" | grep -q "Failed"; then
-            log_message "Успешное подключение к Hive, поинты получены"
+        
+        # Проверяем статус демона
+        STATUS_RESULT=$($HOME/.aios/aios-cli status 2>&1)
+        
+        if echo "$STATUS_RESULT" | grep -q "Daemon running"; then
+            log_message "Демон запущен успешно!"
             success=true
+            
+            if ! echo "$POINTS_OUTPUT" | grep -q "Failed"; then
+                log_message "Успешное подключение к Hive, поинты получены"
+            else
+                log_message "Демон запущен, но поинты еще не получены (это нормально)"
+            fi
         else
-            log_message "Не удалось получить поинты. Попытка $hive_retry не удалась."
+            log_message "ОШИБКА: Демон не запущен, повторная попытка..."
             
             if [ $hive_retry -lt $MAX_HIVE_RETRIES ]; then
                 log_message "Ожидаем 30 секунд перед следующей попыткой..."
@@ -678,6 +692,9 @@ restart_node() {
             fi
         fi
     done
+    
+    # Удаляем временный скрипт
+    rm -f $HOME/hyperspace_restart_temp.sh
     
     if [ "$success" = true ]; then
         log_message "Нода успешно перезапущена и подключена к Hive!"
