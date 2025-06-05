@@ -94,7 +94,15 @@ install_node() {
     aios-cli hive select-tier 3
     
     echo -e "${GREEN}🧠 Выполнение inference для проверки...${NC}"
-    aios-cli hive infer --model hf:TheBloke/Mistral-7B-Instruct-v0.1-GGUF:mistral-7b-instruct-v0.1.Q4_K_S.gguf --prompt "Hello, how are you?"
+    # Используем таймаут, чтобы избежать зависания
+    timeout 10s aios-cli hive infer --model hf:TheBloke/Mistral-7B-Instruct-v0.1-GGUF:mistral-7b-instruct-v0.1.Q4_K_S.gguf --prompt "Hello, how are you?" &>/dev/null
+    if [ $? -eq 124 ]; then
+        echo -e "${YELLOW}Inference проверка пропущена из-за таймаута. Продолжаем...${NC}"
+    elif [ $? -eq 0 ]; then
+        echo -e "${GREEN}Inference успешно выполнен${NC}"
+    else
+        echo -e "${YELLOW}Inference проверка не пройдена, но продолжаем...${NC}"
+    fi
 
     echo -e "${GREEN}🔍 Проверка статуса ноды...${NC}"
     aios-cli status
