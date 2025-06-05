@@ -37,7 +37,13 @@ install_node() {
     echo -e "${GREEN}Обновление системы...${NC}"
     sudo apt update && sudo apt upgrade -y
     cd $HOME
+    # Очистка старых файлов моделей для обновления
     rm -rf $HOME/.cache/hyperspace/models/*
+    # Освобождаем порт 50051, если он занят
+    lsof -i :50051 | grep LISTEN | awk '{print $2}' | xargs -r kill -9 2>/dev/null
+    # Удаляем демон файлы
+    rm -rf /tmp/aios* 2>/dev/null
+    rm -rf $HOME/.aios/daemon* 2>/dev/null
     sleep 5
 
     echo -e "${GREEN}🚀 Установка HyperSpace CLI...${NC}"
@@ -81,14 +87,20 @@ install_node() {
     sleep 5
 
     echo -e "${GREEN}Загрузка модели...${NC}"
-    aios-cli models add hf:second-state/Qwen1.5-1.8B-Chat-GGUF:Qwen1.5-1.8B-Chat-Q4_K_M.gguf
+    aios-cli models add hf:TheBloke/Mistral-7B-Instruct-v0.1-GGUF:mistral-7b-instruct-v0.1.Q4_K_S.gguf
 
     echo -e "${GREEN}Подключение к системе...${NC}"
     aios-cli hive connect
     aios-cli hive select-tier 3
+    
+    echo -e "${GREEN}🧠 Выполнение inference для проверки...${NC}"
+    aios-cli hive infer --model hf:TheBloke/Mistral-7B-Instruct-v0.1-GGUF:mistral-7b-instruct-v0.1.Q4_K_S.gguf --prompt "Hello, how are you?"
 
     echo -e "${GREEN}🔍 Проверка статуса ноды...${NC}"
     aios-cli status
+    
+    echo -e "${GREEN}💰 Проверка баланса поинтов...${NC}"
+    aios-cli hive points
 
     echo -e "${GREEN}✅ Установка завершена!${NC}"
 }
@@ -225,9 +237,25 @@ restart_node() {
         fi
     done
     
+    # Запускаем inference для проверки работоспособности
+    echo -e "${BLUE}Проверка inference через hive...${NC}"
+    # Используем таймаут, чтобы избежать зависания
+    timeout 10s aios-cli hive infer --model hf:TheBloke/Mistral-7B-Instruct-v0.1-GGUF:mistral-7b-instruct-v0.1.Q4_K_S.gguf --prompt "Hello, how are you?" &>/dev/null
+    if [ $? -eq 124 ]; then
+        echo -e "${YELLOW}Inference проверка пропущена из-за таймаута. Продолжаем...${NC}"
+    elif [ $? -eq 0 ]; then
+        echo -e "${GREEN}Inference успешно выполнен${NC}"
+    else
+        echo -e "${YELLOW}Inference проверка не пройдена, но продолжаем...${NC}"
+    fi
+    
     # Проверяем статус
     echo -e "${GREEN}Проверка статуса ноды после перезапуска:${NC}"
     aios-cli status
+    
+    # Проверяем поинты
+    echo -e "${GREEN}Проверка накопленных поинтов:${NC}"
+    aios-cli hive points
     
     echo -e "${GREEN}✅ Нода перезапущена!${NC}"
 
@@ -380,8 +408,15 @@ check_node_health() {
     fi
     
     # Проверяем доступность aios-cli
-    if ! command -v aios-cli &> /dev/null; then
-        log_message "aios-cli не найден в PATH"
+    if ! command -v aios-cli &> /dev/null && [ ! -f "$HOME/.aios/aios-cli" ]; then
+        log_message "aios-cli не найден ни в PATH, ни в $HOME/.aios/"
+        return 1
+    fi
+    
+    # Проверяем возможность выполнения inference
+    INFERENCE_TEST=$($HOME/.aios/aios-cli hive infer --model hf:TheBloke/Mistral-7B-Instruct-v0.1-GGUF:mistral-7b-instruct-v0.1.Q4_K_S.gguf --prompt "Test" 2>&1)
+    if echo "$INFERENCE_TEST" | grep -q "error"; then
+        log_message "Ошибка при выполнении inference: $INFERENCE_TEST"
         return 1
     fi
     
@@ -436,6 +471,21 @@ while true; do
     # Проверяем, получили ли мы значение поинтов
     if [ -z "$CURRENT_POINTS" ]; then
         log_message "Не удалось получить значение поинтов, пропускаем итерацию"
+        # Проверяем inference как дополнительный тест работоспособности
+        INFERENCE_OUTPUT=$($HOME/.aios/aios-cli hive infer --model hf:TheBloke/Mistral-7B-Instruct-v0.1-GGUF:mistral-7b-instruct-v0.1.Q4_K_S.gguf --prompt "Hello" 2>&1)
+        if echo "$INFERENCE_OUTPUT" | grep -q "error"; then
+            log_message "Inference тест не пройден: $INFERENCE_OUTPUT"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+            if [ $FAIL_COUNT -ge $MAX_FAIL_RETRIES ]; then
+                log_message "Несколько тестов не пройдено, перезапускаем ноду"
+                restart_node
+                FAIL_COUNT=0
+                NAN_COUNT=0
+                LAST_POINTS="0"
+            fi
+        else
+            log_message "Inference тест пройден успешно, продолжаем мониторинг"
+        fi
         sleep 300
         continue
     fi
